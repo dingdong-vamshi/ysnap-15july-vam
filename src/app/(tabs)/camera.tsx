@@ -411,18 +411,18 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
 
   // Scanner vertical bar animation
   useEffect(() => {
-    if (cameraState === 'analysing') {
+    if (cameraState === 'preparing' || cameraState === 'analysing') {
       Animated.loop(
         Animated.sequence([
           Animated.timing(scanLineAnim, {
             toValue: 1,
-            duration: 2000,
-            useNativeDriver: true,
+            duration: 1800,
+            useNativeDriver: false,
           }),
           Animated.timing(scanLineAnim, {
             toValue: 0,
-            duration: 2000,
-            useNativeDriver: true,
+            duration: 1800,
+            useNativeDriver: false,
           }),
         ])
       ).start();
@@ -433,20 +433,23 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
 
   // Gradual progress messages animation
   useEffect(() => {
-    if (cameraState === 'analysing') {
+    if (cameraState === 'preparing' || cameraState === 'analysing') {
       const messages = [
-        "Looking at the image...",
-        "Reading visible text...",
-        "Identifying objects...",
-        "Preparing useful actions..."
+        "Looking at the image",
+        "Reading visible text",
+        "Detecting the language",
+        "Identifying objects",
+        "Preparing your explanation"
       ];
       let idx = 0;
       setProgressMessage(messages[0]);
       const interval = setInterval(() => {
         idx = (idx + 1) % messages.length;
         setProgressMessage(messages[idx]);
-      }, 1500);
-      return () => clearInterval(interval);
+      }, 1800);
+      return () => {
+        clearInterval(interval);
+      };
     }
   }, [cameraState]);
 
@@ -510,6 +513,7 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
         setCapturedImage(dataUrl);
         setCameraState('captured');
         stopWebCamera();
+        await handleStartAnalysis(dataUrl);
       } else {
         if (!cameraRef.current) throw new Error('Camera view not initialized');
         const photo = await cameraRef.current.takePictureAsync({
@@ -518,6 +522,7 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
         });
         setCapturedImage(photo.uri);
         setCameraState('captured');
+        await handleStartAnalysis(photo.uri);
       }
     } catch (err: any) {
       console.error('Capture error:', err);
@@ -538,11 +543,13 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
       });
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
-        setCapturedImage(result.assets[0].uri);
+        const uri = result.assets[0].uri;
+        setCapturedImage(uri);
         setCameraState('captured');
         if (Platform.OS === 'web') {
           stopWebCamera();
         }
+        await handleStartAnalysis(uri);
       }
     } catch (err) {
       console.log('Image picker error:', err);
@@ -590,14 +597,15 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
   };
 
   // Run Visual Analysis
-  const handleStartAnalysis = async () => {
-    if (!capturedImage) return;
+  const handleStartAnalysis = async (imageUri?: string) => {
+    const targetImage = imageUri || capturedImage;
+    if (!targetImage) return;
 
     setCameraState('preparing');
     try {
       setCameraState('analysing');
 
-      const data = await visualAnalysisService.analyseCapturedImage(capturedImage, targetLanguage, mode);
+      const data = await visualAnalysisService.analyseCapturedImage(targetImage, targetLanguage, mode);
       
       // Enforce default translation values if missing
       if (!data.defaultTranslation) {
@@ -613,7 +621,7 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
       setCameraState('result');
 
       // Play Gemini Live speech explanation!
-      startLiveSession(capturedImage, data);
+      startLiveSession(targetImage, data);
 
       // Save to unified activity_history in Supabase
       if (user) {
@@ -642,7 +650,7 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
           });
 
           // Upload captured image file to history-files storage
-          const imgResponse = await fetch(capturedImage);
+          const imgResponse = await fetch(targetImage);
           const imgBlob = await imgResponse.blob();
           const imgPath = await historyService.uploadFile('camera', activity.id, 'captured.jpg', imgBlob, 'image/jpeg');
 
@@ -906,25 +914,42 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
           <View style={styles.previewWrapper}>
             <Image source={{ uri: capturedImage }} style={styles.previewImage} resizeMode="contain" />
 
-            {cameraState === 'analysing' && (
+            {(cameraState === 'preparing' || cameraState === 'analysing') && (
               <View style={styles.processingMask}>
-                <ActivityIndicator size="large" color={colors.background} />
-                <Text style={styles.processingText}>{progressMessage}</Text>
-                
-                {/* Vertical Scanner bar */}
+                {/* Four clean corner boundaries */}
+                <View style={styles.scannerCorners}>
+                  <View style={[styles.cornerBracket, styles.bracketTopLeft, { borderColor: '#9F55FF' }]} />
+                  <View style={[styles.cornerBracket, styles.bracketTopRight, { borderColor: '#9F55FF' }]} />
+                  <View style={[styles.cornerBracket, styles.bracketBottomLeft, { borderColor: '#9F55FF' }]} />
+                  <View style={[styles.cornerBracket, styles.bracketBottomRight, { borderColor: '#9F55FF' }]} />
+                </View>
+
+                {/* Vertical Scanner bar and glow */}
+                <Animated.View 
+                  style={[
+                    styles.scannerBarGlow,
+                    {
+                      top: scanLineAnim.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: ['15%', '85%']
+                      })
+                    }
+                  ]}
+                />
                 <Animated.View 
                   style={[
                     styles.scannerBar,
                     {
-                      transform: [{
-                        translateY: scanLineAnim.interpolate({
-                          inputRange: [0, 1],
-                          outputRange: [0, 240]
-                        })
-                      }]
+                      top: scanLineAnim.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: ['15%', '85%']
+                      })
                     }
                   ]}
                 />
+
+                <ActivityIndicator size="large" color="#9F55FF" style={{ marginTop: 40 }} />
+                <Text style={styles.processingText}>{progressMessage}</Text>
               </View>
             )}
           </View>
@@ -1464,25 +1489,42 @@ const createStyles = (colors: any) => StyleSheet.create({
   },
   processingMask: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(9, 9, 9, 0.7)',
+    backgroundColor: 'rgba(9, 9, 9, 0.4)',
     justifyContent: 'center',
     alignItems: 'center',
   },
   processingText: {
     ...typography.bodyMedium,
-    color: colors.textInverse,
+    color: '#FFFFFF',
     marginTop: spacing.md,
+    fontWeight: '600',
   },
   scannerBar: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    height: 4,
-    backgroundColor: colors.accentPurple,
-    shadowColor: colors.accentPurple,
+    left: '10%',
+    right: '10%',
+    height: 3,
+    backgroundColor: '#9F55FF',
+    shadowColor: '#9F55FF',
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.8,
     shadowRadius: 10,
+  },
+  scannerBarGlow: {
+    position: 'absolute',
+    left: '10%',
+    right: '10%',
+    height: 40,
+    backgroundColor: 'rgba(159, 85, 255, 0.15)',
+    marginTop: -20,
+    borderRadius: 8,
+  },
+  scannerCorners: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
   },
   webCameraContainer: {
     flex: 1,
