@@ -121,7 +121,54 @@ const searchLanguages = [
   { code: 'ru', name: 'Russian' }
 ];
 
+class CameraErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error("CameraErrorBoundary caught an error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#121212', padding: 24 }}>
+          <Ionicons name="alert-circle-outline" size={64} color="#FF5252" style={{ marginBottom: 16 }} />
+          <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#FFFFFF', marginBottom: 8 }}>Camera failed to load.</Text>
+          <Text style={{ fontSize: 14, color: '#AAAAAA', textAlign: 'center', marginBottom: 24 }}>
+            Error Code: {this.state.error?.name || 'UNKNOWN_ERROR'} (Safe Diagnostic: {this.state.error?.message || 'None'})
+          </Text>
+          <TouchableOpacity
+            style={{ backgroundColor: '#9F55FF', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 12 }}
+            onPress={() => this.setState({ hasError: false, error: null })}
+          >
+            <Text style={{ color: '#FFFFFF', fontWeight: 'bold' }}>Try Again</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function CameraScreen() {
+  return (
+    <CameraErrorBoundary>
+      <CameraScreenInner />
+    </CameraErrorBoundary>
+  );
+}
+
+function CameraScreenInner() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const { isDark } = useTheme();
@@ -149,7 +196,9 @@ export default function CameraScreen() {
   const cameraRef = useRef<any>(null);
 
   // Web MediaStream References
+  const streamRef = useRef<any>(null);
   const videoRef = useRef<any>(null);
+  const isStartingCameraRef = useRef(false);
   const [webStream, setWebStream] = useState<any>(null);
 
   // Image URI and Results
@@ -212,22 +261,7 @@ export default function CameraScreen() {
   });
   const targetLanguage = profile?.primary_target_language || 'en';
 
-  const resetCameraSession = () => {
-    stopSpeaking();
-    setCapturedImage(null);
-    setAnalysisResult(null);
-    setCameraState('ready');
-    setErrorMessage(null);
-    setProgressMessage('');
-    setTranslationResult(null);
-    setSelectedTargetLanguage(null);
-    setFollowUpQuestion('');
-    setFollowUpHistory([]);
-    setFollowUpLoading(false);
-    setCurrentRequestId(generateUUID());
-  };
-
-  const stopSpeaking = () => {
+  const stopSpeaking = React.useCallback(() => {
     setIsPlayingLiveAudio(false);
     if (liveWsRef.current) {
       try {
@@ -241,9 +275,24 @@ export default function CameraScreen() {
       } catch (e) {}
       pcmPlayerRef.current = null;
     }
-  };
+  }, []);
 
-  const startLiveSession = async (imageBase64: string, result: VisualAnalysisResult) => {
+  const resetCameraSession = React.useCallback(() => {
+    stopSpeaking();
+    setCapturedImage(null);
+    setAnalysisResult(null);
+    setCameraState('ready');
+    setErrorMessage(null);
+    setProgressMessage('');
+    setTranslationResult(null);
+    setSelectedTargetLanguage(null);
+    setFollowUpQuestion('');
+    setFollowUpHistory([]);
+    setFollowUpLoading(false);
+    setCurrentRequestId(generateUUID());
+  }, [stopSpeaking]);
+
+  const startLiveSession = React.useCallback(async (imageBase64: string, result: VisualAnalysisResult) => {
     stopSpeaking();
     setSpokenTranscript('');
     setIsPlayingLiveAudio(true);
@@ -333,41 +382,120 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
       setIsPlayingLiveAudio(false);
       Alert.alert("Gemini Live error", err.message || "Failed to start audio explanation.");
     }
-  };
+  }, [stopSpeaking, selectedTargetLanguage, targetLanguage]);
+
+  const attachStreamToVideo = React.useCallback(() => {
+    if (Platform.OS !== 'web') return;
+    const video = videoRef.current;
+    const stream = streamRef.current;
+    if (video && stream) {
+      if (video.srcObject !== stream) {
+        console.log('[Camera] Setting srcObject on video element');
+        video.srcObject = stream;
+        video.autoplay = true;
+        video.muted = true;
+        video.playsInline = true;
+        
+        const handleLoadedMetadata = () => {
+          console.log('[Camera] loadedmetadata event fired');
+          video.play()
+            .then(() => {
+              console.log('[Camera] play() resolved. ReadyState:', video.readyState, 'Dimensions:', video.videoWidth, 'x', video.videoHeight);
+              if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+                setCameraState('ready');
+              } else {
+                const checkInterval = setInterval(() => {
+                  if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+                    console.log('[Camera] Polled dimensions ready:', video.videoWidth, 'x', video.videoHeight);
+                    setCameraState('ready');
+                    clearInterval(checkInterval);
+                  }
+                }, 100);
+                setTimeout(() => clearInterval(checkInterval), 2000);
+              }
+            })
+            .catch((playErr: any) => {
+              console.warn('[Camera] play() failed or was aborted:', playErr);
+              setCameraState('error');
+              setErrorMessage('Webcam stream play failed: ' + (playErr.message || 'interaction required'));
+            });
+        };
+
+        video.addEventListener('loadedmetadata', handleLoadedMetadata);
+        if (video.readyState >= 1) {
+          handleLoadedMetadata();
+        }
+      }
+    } else {
+      console.log('[Camera] attachStreamToVideo: Video or Stream is missing', { hasVideo: !!video, hasStream: !!stream });
+    }
+  }, []);
+
+  const videoRefCallback = React.useCallback((el: any) => {
+    console.log('[Camera] videoRefCallback called with:', el);
+    videoRef.current = el;
+    if (el) {
+      attachStreamToVideo();
+    }
+  }, [attachStreamToVideo]);
 
   // Web Camera start
-  const startWebCamera = async () => {
+  const startWebCamera = React.useCallback(async () => {
     if (Platform.OS !== 'web') return;
+    if (isStartingCameraRef.current) {
+      console.log('[Camera] startWebCamera already in progress, skipping');
+      return;
+    }
+    isStartingCameraRef.current = true;
+
+    // Stop any existing stream first
+    if (streamRef.current) {
+      console.log('[Camera] Stopping stale stream before start');
+      try {
+        streamRef.current.getTracks().forEach((track: any) => track.stop());
+      } catch (e) {}
+      streamRef.current = null;
+    }
+
     try {
       setCameraState('requesting_permission');
+      console.log('[Camera] Requesting stream via getUserMedia');
+      
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false
       });
+      
+      console.log('[Camera] Stream obtained. Track count:', stream.getVideoTracks().length);
+      streamRef.current = stream;
       setWebStream(stream);
-      setCameraState('ready');
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play().catch((e: any) => console.log('Video play error:', e));
-      }
+      attachStreamToVideo();
     } catch (err: any) {
-      console.warn('Web media stream permission error:', err);
+      console.warn('[Camera] Web media stream permission error:', err);
       setCameraState('permission_denied');
       setErrorMessage(err.message || 'Camera permission was denied. Upload an image instead.');
+    } finally {
+      isStartingCameraRef.current = false;
     }
-  };
+  }, [attachStreamToVideo]);
 
-  // Web Camera stop
-  const stopWebCamera = () => {
+  const stopWebCamera = React.useCallback(() => {
     if (Platform.OS !== 'web') return;
-    if (webStream) {
-      webStream.getTracks().forEach((track: any) => track.stop());
-      setWebStream(null);
+    console.log('[Camera] stopWebCamera called');
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track: any) => {
+        try {
+          track.stop();
+          console.log('[Camera] Stopped track:', track.label);
+        } catch (e) {}
+      });
+      streamRef.current = null;
     }
+    setWebStream(null);
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
-  };
+  }, []);
 
   // Reactively start/stop camera on focus changes
   useEffect(() => {
@@ -377,32 +505,24 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
     } else {
       stopWebCamera();
     }
-  }, [isFocused, capturedImage]);
-
-  // Bind webStream to video element once mounted
-  useEffect(() => {
-    if (Platform.OS === 'web' && videoRef.current && webStream) {
-      if (videoRef.current.srcObject !== webStream) {
-        videoRef.current.srcObject = webStream;
-        videoRef.current.play().catch((e: any) => console.log('Video play error:', e));
-      }
-    }
-  }, [webStream, videoRef.current]);
+  }, [isFocused, capturedImage, startWebCamera, stopWebCamera]);
 
   // Handle Tab Focus Lifecycle
   useFocusEffect(
     React.useCallback(() => {
+      console.log('[Camera] Focused screen via useFocusEffect');
       resetCameraSession();
       if (Platform.OS === 'web') {
         startWebCamera();
       }
       return () => {
+        console.log('[Camera] Blurred screen via useFocusEffect cleanup');
         resetCameraSession();
         if (Platform.OS === 'web') {
           stopWebCamera();
         }
       };
-    }, [navigation])
+    }, [startWebCamera, stopWebCamera, resetCameraSession])
   );
 
   // Handle Web Page Visibility Changes
@@ -996,7 +1116,7 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
             Platform.OS === 'web' ? (
               <View style={styles.webCameraContainer} onTouchEnd={handleFocusTap}>
                 <video
-                  ref={videoRef}
+                  ref={videoRefCallback}
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   playsInline
                   muted
