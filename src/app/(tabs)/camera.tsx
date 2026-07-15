@@ -182,7 +182,23 @@ export default function CameraScreen() {
   const [focusIndicator, setFocusIndicator] = useState<{ x: number; y: number } | null>(null);
 
   const navigation = useNavigation();
-  const isFocused = navigation.isFocused();
+  const [isFocused, setIsFocused] = useState(false);
+
+  useEffect(() => {
+    const unsubscribeFocus = navigation.addListener('focus', () => {
+      setIsFocused(true);
+    });
+    const unsubscribeBlur = navigation.addListener('blur', () => {
+      setIsFocused(false);
+    });
+
+    setIsFocused(navigation.isFocused());
+
+    return () => {
+      unsubscribeFocus();
+      unsubscribeBlur();
+    };
+  }, [navigation]);
 
   // Profile preferences
   const { data: profile } = useQuery<any>({
