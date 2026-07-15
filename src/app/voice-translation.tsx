@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import { colors } from '../constants/colors';
@@ -17,6 +17,10 @@ import { MotionScreen } from '../components/MotionScreen';
 import { elevenLabsService } from '../services/elevenLabs';
 import { callEdgeFunction } from '../lib/supabase';
 import { ReactiveVoiceOrb } from '../components';
+import { generateUUID } from '../utils/uuid';
+import { useCreateActivity, useActivityHistoryList, useDeleteActivity } from '../hooks/useActivityHistory';
+import { historyService } from '../services/historyService';
+
 
 export default function VoiceTranslationScreen() {
   const recorder = useAppAudioRecorder({
@@ -27,6 +31,14 @@ export default function VoiceTranslationScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const queryClient = useQueryClient();
+
+  const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
+  const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
+  const historyAudioPlayer = useAudioPlayer('');
+
+  const createActivityMutation = useCreateActivity();
+  const deleteActivityMutation = useDeleteActivity();
+  const { data: history = [], isLoading: loadingHistory } = useActivityHistoryList({ tool: 'voice', limit: 5 });
 
   const [isRecording, setIsRecording] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
@@ -86,7 +98,7 @@ export default function VoiceTranslationScreen() {
   const targetCode = selectedTargetLanguage ?? profile?.primary_target_language ?? 'es';
   const isBusy = isRecording || statusText === 'Processing audio...' ||
     statusText === 'Transcribing and translating...' || statusText === 'Re-translating...' ||
-    statusText === 'Generating voice...';
+    statusText === 'Generating voice...' || statusText === 'Saving history...';
 
   const resetTranslationResult = () => {
     player.pause();
@@ -241,6 +253,48 @@ export default function VoiceTranslationScreen() {
       } else {
         throw new Error('Failed to generate speech output.');
       }
+
+      // Save to unified activity_history in Supabase
+      if (user) {
+        setStatusText('Saving history...');
+        const activity = await createActivityMutation.mutateAsync({
+          client_request_id: currentRequestId,
+          tool: 'voice',
+          operation_type: 'voice_translation',
+          title: sourceText.slice(0, 80),
+          source_language: nativeCode,
+          target_language: targetCode,
+          source_text: sourceText,
+          translated_text: translatedText,
+          duration_seconds: recordTime || undefined,
+          metadata: {
+            session_id: result.session_id,
+            translation_item_id: result.translation_item_id
+          }
+        });
+
+        try {
+          const inputResponse = await fetch(audioUri);
+          const inputBlob = await inputResponse.blob();
+          const inputPath = await historyService.uploadFile('voice', activity.id, 'input.m4a', inputBlob, 'audio/mp4');
+
+          let outputPath = '';
+          if (result.generated_audio_url) {
+            const outputResponse = await fetch(result.generated_audio_url);
+            const outputBlob = await outputResponse.blob();
+            outputPath = await historyService.uploadFile('voice', activity.id, 'output.mp3', outputBlob, 'audio/mpeg');
+          }
+
+          await historyService.updateActivity(activity.id, {
+            input_asset_path: inputPath,
+            output_asset_path: outputPath || undefined,
+          });
+        } catch (uploadErr) {
+          console.warn('Failed to upload audio assets to history-files storage:', uploadErr);
+        }
+      }
+
+      setCurrentRequestId(generateUUID());
       queryClient.invalidateQueries({ queryKey: ['recentSessions', user?.id] });
       queryClient.invalidateQueries({ queryKey: ['historySessions', user?.id] });
     } catch (e: any) {
@@ -360,6 +414,87 @@ export default function VoiceTranslationScreen() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const handleSelectHistoryItem = (item: any) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setTranscription(item.source_text || '');
+    setEditedText(item.source_text || '');
+    setTranslation(item.translated_text || '');
+    setSessionId(item.metadata?.session_id || null);
+    setTranslationItemId(item.metadata?.translation_item_id || null);
+    if (item.output_asset_path) {
+      historyService.getSignedUrl(item.output_asset_path).then((url) => {
+        if (url) {
+          setOutputAudioUrl(url);
+          player.replace({ uri: url });
+        }
+      });
+    } else {
+      setOutputAudioUrl(null);
+    }
+  };
+
+  const handleDeleteHistoryItem = (itemId: string) => {
+    Alert.alert(
+      'Delete History Item',
+      'Are you sure you want to delete this recording from your history?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              await deleteActivityMutation.mutateAsync(itemId);
+              Alert.alert('Success', 'History item deleted.');
+            } catch (err: any) {
+              Alert.alert('Deletion Error', err.message || 'Failed to delete history item.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleExportHistoryItem = async (item: any, mode: 'text' | 'audio' = 'text') => {
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      await historyService.exportActivity(item, mode);
+    } catch (err: any) {
+      Alert.alert('Export Error', err.message || 'Failed to export voice translation.');
+    }
+  };
+
+  const handlePlayHistoryAudio = async (item: any) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (playingHistoryId === item.id) {
+      historyAudioPlayer.pause();
+      setPlayingHistoryId(null);
+      return;
+    }
+    if (!item.output_asset_path) {
+      Alert.alert('Audio Unavailable', 'No audio playback is stored for this item.');
+      return;
+    }
+    try {
+      const url = await historyService.getSignedUrl(item.output_asset_path);
+      if (url) {
+        setPlayingHistoryId(item.id);
+        historyAudioPlayer.replace({ uri: url });
+        historyAudioPlayer.play();
+      }
+    } catch (err: any) {
+      console.error(err);
+      Alert.alert('Playback Error', 'Failed to play history audio.');
+    }
+  };
+
+  useEffect(() => {
+    if (playingHistoryId && !historyAudioPlayer.playing && historyAudioPlayer.currentTime >= historyAudioPlayer.duration - 0.2) {
+      setPlayingHistoryId(null);
+    }
+  }, [historyAudioPlayer.playing, historyAudioPlayer.currentTime]);
+
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style="dark" />
@@ -410,8 +545,6 @@ export default function VoiceTranslationScreen() {
           </Pressable>
         </View>
 
-
-
         {/* Audio Waveform and Timer Box */}
         <View style={styles.visualizerBox}>
           {isRecording ? (
@@ -447,7 +580,13 @@ export default function VoiceTranslationScreen() {
             metering={recorderState?.metering}
             isPlaying={isPlaying}
             isProcessing={isBusy && !isRecording}
-            onPress={isRecording ? handleStopRecording : handleStartRecording}
+            onPress={() => {
+              if (isRecording) {
+                handleStopRecording();
+              } else if (!isBusy) {
+                handleStartRecording();
+              }
+            }}
           />
           <Text style={styles.orbLabel}>
             {isRecording ? 'Tap to finish speaking' : 'Tap to start speaking'}
@@ -505,6 +644,48 @@ export default function VoiceTranslationScreen() {
             </View>
           </View>
         )}
+
+        {/* Unified Tool History */}
+        <View style={styles.historyContainer}>
+          <Text style={styles.sectionHeader}>Recent History</Text>
+          {loadingHistory ? (
+            <ActivityIndicator color={colors.primary} style={{ marginVertical: 20 }} />
+          ) : history && history.length > 0 ? (
+            history.map((item) => (
+              <View key={item.id} style={styles.historyCard}>
+                <Pressable style={styles.historyCardBody} onPress={() => handleSelectHistoryItem(item)}>
+                  <View style={styles.historyCardHeader}>
+                    <Text style={styles.historyCardMeta}>
+                      {item.source_language?.toUpperCase()} → {item.target_language?.toUpperCase()}
+                    </Text>
+                    <Text style={styles.historyCardTime}>
+                      {item.created_at ? new Date(item.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''}
+                    </Text>
+                  </View>
+                  <Text style={styles.historySourceText} numberOfLines={2}>{item.source_text}</Text>
+                  <Text style={styles.historyTranslatedText} numberOfLines={2}>{item.translated_text}</Text>
+                </Pressable>
+                <View style={styles.historyCardActions}>
+                  <Pressable style={styles.historyActionBtn} onPress={() => handlePlayHistoryAudio(item)}>
+                    <Ionicons 
+                      name={playingHistoryId === item.id ? 'pause-outline' : 'play-outline'} 
+                      size={16} 
+                      color={playingHistoryId === item.id ? colors.accentPurple : colors.textSecondary} 
+                    />
+                  </Pressable>
+                  <Pressable style={styles.historyActionBtn} onPress={() => handleExportHistoryItem(item, 'text')}>
+                    <Ionicons name="download-outline" size={16} color={colors.textSecondary} />
+                  </Pressable>
+                  <Pressable style={styles.historyActionBtn} onPress={() => handleDeleteHistoryItem(item.id)}>
+                    <Ionicons name="trash-outline" size={16} color={colors.error} />
+                  </Pressable>
+                </View>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.emptyHistoryText}>No voice recordings yet. Tap the microphone to speak.</Text>
+          )}
+        </View>
       </ScrollView>
       </MotionScreen>
 
@@ -962,5 +1143,78 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.textSecondary,
     letterSpacing: 0.5,
+  },
+  historyContainer: {
+    marginTop: 30,
+    marginBottom: 20,
+  },
+  historyCard: {
+    backgroundColor: colors.surfaceSoft,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 16,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  historyCardBody: {
+    flex: 1,
+    marginRight: 12,
+  },
+  historyCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  historyCardMeta: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    fontWeight: '700',
+    color: colors.textMuted,
+  },
+  historyCardTime: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    color: colors.textSubtle,
+  },
+  historySourceText: {
+    fontSize: 14,
+    fontFamily: typography.bodyMedium.fontFamily,
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  historyTranslatedText: {
+    fontSize: 14,
+    fontFamily: typography.body.fontFamily,
+    color: colors.accentPurple,
+  },
+  historyCardActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  historyActionBtn: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  emptyHistoryText: {
+    fontSize: 14,
+    fontFamily: typography.body.fontFamily,
+    color: colors.textSubtle,
+    textAlign: 'center',
+    marginTop: 10,
+  },
+  sectionHeader: {
+    fontSize: 14,
+    fontFamily: typography.captionMedium.fontFamily,
+    fontWeight: '700',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 1.5,
+    marginBottom: 10,
   },
 });

@@ -11,8 +11,9 @@ import { typography } from '../constants/typography';
 import { getLanguageByCode } from '../constants/languages';
 import { Ionicons } from '@expo/vector-icons';
 import { useAudioPlayer } from 'expo-audio';
+import { historyService } from '../services/historyService';
 
-type SessionTypeFilter = 'all' | 'text' | 'voice' | 'camera' | 'conversation';
+type SessionTypeFilter = 'all' | 'type' | 'voice' | 'camera' | 'conversation' | 'accent_changer' | 'voice_clone';
 
 function AudioPlayButton({ audioUrl }: { audioUrl: string }) {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -55,14 +56,16 @@ export default function HistoryScreen() {
 
   // Detail Modal state
   const [selectedSession, setSelectedSession] = useState<any | null>(null);
+  const [signedInputUrl, setSignedInputUrl] = useState<string | null>(null);
+  const [signedOutputUrl, setSignedOutputUrl] = useState<string | null>(null);
 
-  // 1. Fetch History Sessions
-  const { data: sessions, isLoading } = useQuery<any[]>({
-    queryKey: ['historySessions', user?.id],
+  // 1. Fetch unified activity_history
+  const { data: sessions = [], isLoading, refetch } = useQuery<any[]>({
+    queryKey: ['activityHistory', user?.id],
     queryFn: async () => {
       if (!user?.id) return [];
       const { data, error } = await supabase
-        .from('translation_sessions')
+        .from('activity_history')
         .select('*')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false });
@@ -72,89 +75,23 @@ export default function HistoryScreen() {
     enabled: !!user?.id,
   });
 
-  // 2. Fetch Selected Session Items (with signed URLs)
-  const { data: sessionItems = [], isLoading: isItemsLoading } = useQuery<any[]>({
-    queryKey: ['sessionItems', selectedSession?.id],
-    queryFn: async () => {
-      if (!selectedSession?.id) return [];
-      const { data, error } = await supabase
-        .from('translation_items')
-        .select('*')
-        .eq('session_id', selectedSession.id)
-        .order('sequence_number', { ascending: true });
-      if (error) throw error;
+  // Resolve signed URLs for selected history item
+  useEffect(() => {
+    if (selectedSession) {
+      setSignedInputUrl(null);
+      setSignedOutputUrl(null);
 
-      const items = data || [];
-      const itemsWithUrls = await Promise.all(
-        items.map(async (item) => {
-          let source_audio_url = null;
-          let generated_audio_url = null;
-          if (item.source_audio_path) {
-            const { data: sData } = await supabase.storage
-              .from('media')
-              .createSignedUrl(item.source_audio_path, 3600);
-            source_audio_url = sData?.signedUrl || null;
-          }
-          if (item.generated_audio_path) {
-            const { data: gData } = await supabase.storage
-              .from('media')
-              .createSignedUrl(item.generated_audio_path, 3600);
-            generated_audio_url = gData?.signedUrl || null;
-          }
-          return { ...item, source_audio_url, generated_audio_url };
-        })
-      );
-      return itemsWithUrls;
-    },
-    enabled: !!selectedSession?.id,
-  });
-
-  // 3. Fetch AI summaries if type is conversation
-  const { data: summaryData } = useQuery<any>({
-    queryKey: ['sessionSummary', selectedSession?.id],
-    queryFn: async () => {
-      if (!selectedSession?.id || selectedSession.session_type !== 'conversation') return null;
-      const { data } = await supabase
-        .from('conversation_summaries')
-        .select('*')
-        .eq('session_id', selectedSession.id)
-        .single();
-      return data ?? null;
-    },
-    enabled: !!selectedSession?.id && selectedSession.session_type === 'conversation',
-  });
-
-  // 4. Fetch Media Assets for Selected Session (with signed URLs)
-  const { data: mediaAssets = [] } = useQuery<any[]>({
-    queryKey: ['mediaAssets', selectedSession?.id],
-    queryFn: async () => {
-      if (!selectedSession?.id) return [];
-      const { data, error } = await supabase
-        .from('media_assets')
-        .select('*')
-        .eq('session_id', selectedSession.id);
-      if (error) throw error;
-
-      const assets = data || [];
-      const assetsWithUrls = await Promise.all(
-        assets.map(async (asset) => {
-          let signed_url = null;
-          if (asset.path) {
-            const { data: sData } = await supabase.storage
-              .from(asset.bucket || 'media')
-              .createSignedUrl(asset.path, 3600);
-            signed_url = sData?.signedUrl || null;
-          }
-          return { ...asset, signed_url };
-        })
-      );
-      return assetsWithUrls;
-    },
-    enabled: !!selectedSession?.id,
-  });
+      if (selectedSession.input_asset_path) {
+        historyService.getSignedUrl(selectedSession.input_asset_path).then(setSignedInputUrl);
+      }
+      if (selectedSession.output_asset_path) {
+        historyService.getSignedUrl(selectedSession.output_asset_path).then(setSignedOutputUrl);
+      }
+    }
+  }, [selectedSession]);
 
   // Auto-open session if passed in params
-  React.useEffect(() => {
+  useEffect(() => {
     if (params.sessionId && sessions && sessions.length > 0) {
       const sess = sessions.find((s) => s.id === params.sessionId);
       if (sess) setSelectedSession(sess);
@@ -164,13 +101,14 @@ export default function HistoryScreen() {
   // Filtering Logic
   const filteredSessions = (sessions ?? []).filter((sess) => {
     const matchesSearch = sess.title?.toLowerCase().includes(searchQuery.toLowerCase()) || 
-      sess.source_language.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      sess.target_language.toLowerCase().includes(searchQuery.toLowerCase());
+      sess.source_text?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      sess.translated_text?.toLowerCase().includes(searchQuery.toLowerCase());
     
-    const matchesType = activeFilter === 'all' || sess.session_type === activeFilter;
+    const matchesType = activeFilter === 'all' || sess.tool === activeFilter;
+    
     const matchesLang = !selectedLanguageFilter || 
-      sess.source_language === selectedLanguageFilter || 
-      sess.target_language === selectedLanguageFilter;
+      sess.metadata?.sourceLanguage === selectedLanguageFilter || 
+      sess.metadata?.targetLanguage === selectedLanguageFilter;
 
     return matchesSearch && matchesType && matchesLang;
   });
@@ -233,7 +171,7 @@ export default function HistoryScreen() {
           showsHorizontalScrollIndicator={false} 
           contentContainerStyle={styles.chipsContainer}
         >
-          {(['all', 'text', 'voice', 'camera', 'conversation'] as SessionTypeFilter[]).map((type) => {
+          {(['all', 'type', 'voice', 'camera', 'conversation', 'accent_changer', 'voice_clone'] as SessionTypeFilter[]).map((type) => {
             const selected = activeFilter === type;
             return (
               <Pressable
@@ -245,7 +183,7 @@ export default function HistoryScreen() {
                 }}
               >
                 <Text style={[styles.chipText, selected && styles.chipTextActive]}>
-                  {type.charAt(0).toUpperCase() + type.slice(1)}
+                  {type === 'type' ? 'Text' : type === 'accent_changer' ? 'Accent' : type === 'voice_clone' ? 'Clone' : type.charAt(0).toUpperCase() + type.slice(1)}
                 </Text>
               </Pressable>
             );
@@ -260,44 +198,60 @@ export default function HistoryScreen() {
         </View>
       ) : filteredSessions.length > 0 ? (
         <ScrollView contentContainerStyle={styles.listContainer} showsVerticalScrollIndicator={false}>
-          {filteredSessions.map((session) => (
-            <Pressable 
-              key={session.id} 
-              style={styles.historyCard}
-              onPress={() => handleSelectSession(session)}
-            >
-              <View style={styles.cardTop}>
-                <View style={styles.badgeRow}>
-                  <View style={styles.typeBadge}>
-                    <Ionicons 
-                      name={
-                        session.session_type === 'voice' 
-                          ? 'mic-outline' 
-                          : session.session_type === 'camera' 
-                          ? 'camera-outline' 
-                          : session.session_type === 'conversation'
-                          ? 'chatbubbles-outline'
-                          : 'document-text-outline'
-                      } 
-                      size={12} 
-                      color={colors.textMuted} 
-                      style={{ marginRight: 4 }} 
-                    />
-                    <Text style={styles.badgeText}>{session.session_type.toUpperCase()}</Text>
+          {filteredSessions.map((session) => {
+            const toolIcon = session.tool === 'voice' 
+              ? 'mic-outline' 
+              : session.tool === 'camera' 
+              ? 'camera-outline' 
+              : session.tool === 'conversation'
+              ? 'chatbubbles-outline'
+              : session.tool === 'accent_changer'
+              ? 'sparkles-outline'
+              : session.tool === 'voice_clone'
+              ? 'people-outline'
+              : 'document-text-outline';
+
+            const toolLabel = session.tool === 'type' 
+              ? 'TEXT' 
+              : session.tool === 'accent_changer' 
+              ? 'ACCENT' 
+              : session.tool === 'voice_clone' 
+              ? 'CLONE' 
+              : session.tool?.toUpperCase();
+
+            return (
+              <Pressable 
+                key={session.id} 
+                style={styles.historyCard}
+                onPress={() => handleSelectSession(session)}
+              >
+                <View style={styles.cardTop}>
+                  <View style={styles.badgeRow}>
+                    <View style={styles.typeBadge}>
+                      <Ionicons 
+                        name={toolIcon} 
+                        size={12} 
+                        color={colors.textMuted} 
+                        style={{ marginRight: 4 }} 
+                      />
+                      <Text style={styles.badgeText}>{toolLabel}</Text>
+                    </View>
+                    {session.metadata?.sourceLanguage && session.metadata?.targetLanguage && (
+                      <Text style={styles.langPairLabel}>
+                        {getLanguageByCode(session.metadata.sourceLanguage)?.name} → {getLanguageByCode(session.metadata.targetLanguage)?.name}
+                      </Text>
+                    )}
                   </View>
-                  <Text style={styles.langPairLabel}>
-                    {getLanguageByCode(session.source_language)?.name} → {getLanguageByCode(session.target_language)?.name}
+                  <Text style={styles.cardTime}>
+                    {new Date(session.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
                   </Text>
                 </View>
-                <Text style={styles.cardTime}>
-                  {new Date(session.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                <Text style={styles.cardTitle} numberOfLines={1}>
+                  {session.title || 'Untitled Activity'}
                 </Text>
-              </View>
-              <Text style={styles.cardTitle} numberOfLines={1}>
-                {session.title || 'Untitled Session'}
-              </Text>
-            </Pressable>
-          ))}
+              </Pressable>
+            );
+          })}
         </ScrollView>
       ) : (
         <View style={styles.emptyContainer}>
@@ -316,178 +270,163 @@ export default function HistoryScreen() {
       >
         <View style={styles.detailContainer}>
           <View style={styles.detailHeader}>
-            <Text style={styles.detailHeaderTitle}>Session Details</Text>
+            <Text style={styles.detailHeaderTitle}>Activity Details</Text>
             <Pressable style={styles.closeButton} onPress={handleDismissDetail}>
               <Ionicons name="close" size={24} color={colors.textPrimary} />
             </Pressable>
           </View>
 
-          {isItemsLoading ? (
-            <View style={styles.detailLoader}>
-              <ActivityIndicator size="small" color={colors.primary} />
-            </View>
-          ) : (
-            <ScrollView contentContainerStyle={styles.detailScroll} showsVerticalScrollIndicator={false}>
-              
-              {/* Meta information card */}
-              <View style={styles.metaRow}>
-                <View style={styles.typeBadge}>
-                  <Text style={styles.badgeText}>{selectedSession?.session_type.toUpperCase()}</Text>
-                </View>
-                <Text style={styles.metaLangs}>
-                  {getLanguageByCode(selectedSession?.source_language ?? 'en')?.name} → {getLanguageByCode(selectedSession?.target_language ?? 'es')?.name}
+          <ScrollView contentContainerStyle={styles.detailScroll} showsVerticalScrollIndicator={false}>
+            {/* Meta information card */}
+            <View style={styles.metaRow}>
+              <View style={styles.typeBadge}>
+                <Text style={styles.badgeText}>
+                  {selectedSession?.tool === 'type' ? 'TEXT' : selectedSession?.tool?.toUpperCase()}
                 </Text>
               </View>
-
-              <Text style={styles.detailTitle}>{selectedSession?.title || 'Untitled Session'}</Text>
-              
-              <View style={styles.detailDivider} />
-
-              {/* Items Render */}
-              <Text style={styles.detailSectionHeading}>Translations ({sessionItems?.length ?? 0})</Text>
-              {sessionItems && sessionItems.length > 0 ? (
-                sessionItems.map((item) => (
-                  <View key={item.id} style={styles.translationDetailCard}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                      <Text style={styles.textLabel}>SOURCE</Text>
-                      {item.source_audio_url && (
-                        <AudioPlayButton audioUrl={item.source_audio_url} />
-                      )}
-                    </View>
-                    <Text style={styles.sourceVal}>{item.source_text}</Text>
-                    
-                    <View style={styles.inlineDivider} />
-                    
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                      <Text style={styles.textLabel}>TRANSLATED</Text>
-                      {item.generated_audio_url && (
-                        <AudioPlayButton audioUrl={item.generated_audio_url} />
-                      )}
-                    </View>
-                    <Text style={styles.targetVal}>{item.translated_text || 'No translation'}</Text>
-                    
-                    {item.transliteration && (
-                      <View style={styles.translitBox}>
-                        <Text style={styles.translitLabel}>PRONUNCIATION</Text>
-                        <Text style={styles.translitVal}>{item.transliteration}</Text>
-                      </View>
-                    )}
-                  </View>
-                ))
-              ) : (
-                <Text style={styles.emptyDetailText}>No translations recorded in this session.</Text>
+              {selectedSession?.metadata?.sourceLanguage && selectedSession?.metadata?.targetLanguage && (
+                <Text style={styles.metaLangs}>
+                  {getLanguageByCode(selectedSession.metadata.sourceLanguage)?.name} → {getLanguageByCode(selectedSession.metadata.targetLanguage)?.name}
+                </Text>
               )}
+            </View>
 
-              {/* Camera Image Scanning details */}
-              {selectedSession?.session_type === 'camera' && (
-                <View style={{ marginTop: 16 }}>
-                  {/* Scanned image */}
-                  {(() => {
-                    const cameraAsset = mediaAssets.find(a => a.media_kind === 'camera_input');
-                    if (cameraAsset?.signed_url) {
-                      return (
-                        <View style={{ marginBottom: 20 }}>
-                          <Text style={styles.detailSectionHeading}>Scanned Photo</Text>
-                          <Image 
-                            source={{ uri: cameraAsset.signed_url }} 
-                            style={styles.scannedImage} 
-                            resizeMode="cover" 
-                          />
+            <Text style={styles.detailTitle}>{selectedSession?.title || 'Untitled Session'}</Text>
+            <View style={styles.detailDivider} />
+
+            {/* Standard Text/Voice translation card */}
+            {(selectedSession?.tool === 'type' || selectedSession?.tool === 'voice' || selectedSession?.tool === 'accent_changer') && (
+              <View style={styles.translationDetailCard}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <Text style={styles.textLabel}>SOURCE INPUT</Text>
+                  {signedInputUrl && (
+                    <AudioPlayButton audioUrl={signedInputUrl} />
+                  )}
+                </View>
+                <Text style={styles.sourceVal}>{selectedSession.source_text || 'Voice input clip'}</Text>
+                
+                {selectedSession.translated_text && (
+                  <>
+                    <View style={styles.inlineDivider} />
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                      <Text style={styles.textLabel}>TRANSLATED OUTPUT</Text>
+                      {signedOutputUrl && (
+                        <AudioPlayButton audioUrl={signedOutputUrl} />
+                      )}
+                    </View>
+                    <Text style={styles.targetVal}>{selectedSession.translated_text}</Text>
+                  </>
+                )}
+              </View>
+            )}
+
+            {/* Camera detail layout */}
+            {selectedSession?.tool === 'camera' && (
+              <View style={{ marginTop: 4 }}>
+                {signedInputUrl && (
+                  <View style={{ marginBottom: 20 }}>
+                    <Text style={styles.detailSectionHeading}>Scanned Image</Text>
+                    <Image 
+                      source={{ uri: signedInputUrl }} 
+                      style={styles.scannedImage} 
+                      resizeMode="cover" 
+                    />
+                  </View>
+                )}
+
+                {selectedSession.operation_type === 'food' && (
+                  <View style={{ marginBottom: 20 }}>
+                    <Text style={styles.detailSectionHeading}>Nutrition Analysis</Text>
+                    <View style={styles.foodReportCard}>
+                      <View style={styles.foodReportHeader}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.foodReportTitle}>{selectedSession.translated_text || selectedSession.source_text}</Text>
+                          <Text style={styles.foodReportSubTitle}>Original: {selectedSession.source_text}</Text>
                         </View>
-                      );
-                    }
-                    return null;
-                  })()}
-
-                  {/* Food Nutrition details */}
-                  {selectedSession?.metadata?.food_info && (
-                    <View style={{ marginBottom: 20 }}>
-                      <Text style={styles.detailSectionHeading}>Nutrition Analysis</Text>
-                      <View style={styles.foodReportCard}>
-                        <View style={styles.foodReportHeader}>
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.foodReportTitle}>
-                              {selectedSession.metadata.food_info.translated_name || selectedSession.metadata.food_info.name}
-                            </Text>
-                            <Text style={styles.foodReportSubTitle}>
-                              Original: {selectedSession.metadata.food_info.name}
-                            </Text>
-                          </View>
-                          {selectedSession.metadata.food_info.confidence && (
-                            <View style={styles.matchBadge}>
-                              <Text style={styles.matchBadgeText}>
-                                {selectedSession.metadata.food_info.confidence}% Match
-                              </Text>
-                            </View>
-                          )}
-                        </View>
-
-                        <View style={styles.macroRow}>
-                          <View style={styles.macroItem}>
-                            <Text style={styles.macroValue}>{selectedSession.metadata.food_info.calories || 0}</Text>
-                            <Text style={styles.macroLabel}>CALORIES</Text>
-                          </View>
-                          <View style={styles.macroItem}>
-                            <Text style={[styles.macroValue, { color: colors.accentBlue }]}>
-                              {selectedSession.metadata.food_info.protein || '0g'}
-                            </Text>
-                            <Text style={styles.macroLabel}>PROTEIN</Text>
-                          </View>
-                          <View style={styles.macroItem}>
-                            <Text style={[styles.macroValue, { color: colors.accentOrange }]}>
-                              {selectedSession.metadata.food_info.carbs || '0g'}
-                            </Text>
-                            <Text style={styles.macroLabel}>CARBS</Text>
-                          </View>
-                          <View style={styles.macroItem}>
-                            <Text style={[styles.macroValue, { color: colors.accentCoral }]}>
-                              {selectedSession.metadata.food_info.fat || '0g'}
-                            </Text>
-                            <Text style={styles.macroLabel}>FAT</Text>
-                          </View>
-                        </View>
-
-                        {selectedSession.metadata.food_info.allergens && selectedSession.metadata.food_info.allergens.length > 0 && (
-                          <View style={styles.allergenAlertCard}>
-                            <Ionicons name="warning-outline" size={16} color={colors.warning} />
-                            <Text style={styles.allergenAlertText}>
-                              Allergen Warnings: {selectedSession.metadata.food_info.allergens.join(', ')}
-                            </Text>
+                        {selectedSession.metadata?.confidence && (
+                          <View style={styles.matchBadge}>
+                            <Text style={styles.matchBadgeText}>{selectedSession.metadata.confidence}% Match</Text>
                           </View>
                         )}
                       </View>
-                    </View>
-                  )}
 
-                  {/* OCR Word list/boxes */}
-                  {selectedSession?.metadata?.ocr_boxes && selectedSession.metadata.ocr_boxes.length > 0 && (
-                    <View style={{ marginBottom: 20 }}>
-                      <Text style={styles.detailSectionHeading}>Detected Text Regions ({selectedSession.metadata.ocr_boxes.length})</Text>
-                      <View style={styles.ocrRegionsCard}>
-                        {selectedSession.metadata.ocr_boxes.map((box: any, idx: number) => (
-                          <View key={idx} style={[styles.ocrRegionItem, idx < selectedSession.metadata.ocr_boxes.length - 1 && styles.ocrRegionDivider]}>
-                            <Text style={styles.ocrRegionSource}>{box.text}</Text>
-                            <Text style={styles.ocrRegionTarget}>{box.translated}</Text>
-                          </View>
-                        ))}
+                      <View style={styles.macroRow}>
+                        <View style={styles.macroItem}>
+                          <Text style={styles.macroValue}>{selectedSession.metadata?.calories || 0}</Text>
+                          <Text style={styles.macroLabel}>CALORIES</Text>
+                        </View>
+                        <View style={styles.macroItem}>
+                          <Text style={[styles.macroValue, { color: colors.accentBlue }]}>{selectedSession.metadata?.protein || '0g'}</Text>
+                          <Text style={styles.macroLabel}>PROTEIN</Text>
+                        </View>
+                        <View style={styles.macroItem}>
+                          <Text style={[styles.macroValue, { color: colors.accentOrange }]}>{selectedSession.metadata?.carbs || '0g'}</Text>
+                          <Text style={styles.macroLabel}>CARBS</Text>
+                        </View>
+                        <View style={styles.macroItem}>
+                          <Text style={[styles.macroValue, { color: colors.accentCoral }]}>{selectedSession.metadata?.fat || '0g'}</Text>
+                          <Text style={styles.macroLabel}>FAT</Text>
+                        </View>
                       </View>
+
+                      {selectedSession.metadata?.allergens && selectedSession.metadata.allergens.length > 0 && (
+                        <View style={styles.allergenAlertCard}>
+                          <Ionicons name="warning-outline" size={16} color={colors.warning} />
+                          <Text style={styles.allergenAlertText}>
+                            Allergens: {selectedSession.metadata.allergens.join(', ')}
+                          </Text>
+                        </View>
+                      )}
                     </View>
+                  </View>
+                )}
+
+                {selectedSession.operation_type !== 'food' && (
+                  <View style={styles.translationDetailCard}>
+                    <Text style={styles.textLabel}>SOURCE TEXT</Text>
+                    <Text style={styles.sourceVal}>{selectedSession.source_text}</Text>
+                    <View style={styles.inlineDivider} />
+                    <Text style={styles.textLabel}>TRANSLATION</Text>
+                    <Text style={styles.targetVal}>{selectedSession.translated_text}</Text>
+                  </View>
+                )}
+              </View>
+            )}
+
+            {/* Conversation detail layout */}
+            {selectedSession?.tool === 'conversation' && (
+              <View style={{ marginTop: 4 }}>
+                <Text style={styles.detailSectionHeading}>Bilingual Transcript</Text>
+                {Array.isArray(selectedSession.transcript) && selectedSession.transcript.length > 0 ? (
+                  selectedSession.transcript.map((t: any, idx: number) => (
+                    <View key={idx} style={styles.translationDetailCard}>
+                      <Text style={styles.textLabel}>SPEAKER {t.speaker || 'UNKNOWN'}</Text>
+                      <Text style={styles.sourceVal}>{t.source_text}</Text>
+                      <View style={styles.inlineDivider} />
+                      <Text style={styles.textLabel}>TRANSLATION</Text>
+                      <Text style={styles.targetVal}>{t.translated_text}</Text>
+                    </View>
+                  ))
+                ) : (
+                  <Text style={styles.emptyDetailText}>No speaker turns recorded.</Text>
+                )}
+              </View>
+            )}
+
+            {/* Voice clone detail layout */}
+            {selectedSession?.tool === 'voice_clone' && (
+              <View style={styles.translationDetailCard}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <Text style={styles.textLabel}>VOICE PROFILE INFO</Text>
+                  {signedInputUrl && (
+                    <AudioPlayButton audioUrl={signedInputUrl} />
                   )}
                 </View>
-              )}
-
-              {/* AI summaries for conversations */}
-              {selectedSession?.session_type === 'conversation' && summaryData && (
-                <View style={styles.summaryBox}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-                    <Ionicons name="sparkles" size={16} color={colors.accentPurple} style={{ marginRight: 6 }} />
-                    <Text style={styles.summaryTitle}>AI Session Summary</Text>
-                  </View>
-                  <Text style={styles.summaryText}>{summaryData.summary}</Text>
-                </View>
-              )}
-            </ScrollView>
-          )}
+                <Text style={styles.sourceVal}>Profile: {selectedSession.title?.replace('Voice Clone: ', '')}</Text>
+                <Text style={styles.targetVal}>{selectedSession.source_text}</Text>
+              </View>
+            )}
+          </ScrollView>
         </View>
       </Modal>
 

@@ -4,6 +4,8 @@ import { AppProviders } from '../providers/AppProviders';
 import { useAuth } from '../contexts/AuthContext';
 import { ActivityIndicator, Platform, View } from 'react-native';
 import { colors } from '../constants/colors';
+import { StatusBar } from 'expo-status-bar';
+import { useTheme } from '../contexts/ThemeContext';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../lib/supabase';
 import { demoProfileStore } from '../utils/tempOnboardingStore';
@@ -192,32 +194,38 @@ function RootLayoutContent() {
     }
   }, [user, profile, activeProfile, isTransitioning, segments, isDemo, queryClient]);
 
+  const { isDark } = useTheme();
+
   if (isTransitioning) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.background }}>
+        <StatusBar style={isDark ? 'light' : 'dark'} />
         <ActivityIndicator size="large" color={colors.primary} />
       </View>
     );
   }
 
   return (
-    <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.background } }}>
-      <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-      <Stack.Screen name="(auth)/welcome" options={{ headerShown: false }} />
-      <Stack.Screen name="(auth)/sign-in" options={{ headerShown: false }} />
-      <Stack.Screen name="(auth)/sign-up" options={{ headerShown: false }} />
-      <Stack.Screen name="(auth)/onboarding" options={{ headerShown: false }} />
-      <Stack.Screen name="(auth)/onboarding-languages" options={{ headerShown: false }} />
-      <Stack.Screen name="(auth)/onboarding-permissions" options={{ headerShown: false }} />
-      <Stack.Screen name="auth/callback" options={{ headerShown: false }} />
-      <Stack.Screen name="conversation-summary" options={{ presentation: 'card', headerShown: false }} />
-      <Stack.Screen name="settings" options={{ presentation: 'card', headerShown: false }} />
-      <Stack.Screen name="privacy-data-usage" options={{ presentation: 'card', headerShown: false }} />
-      <Stack.Screen name="voice-library" options={{ presentation: 'card', headerShown: false }} />
-      <Stack.Screen name="voice-clone" options={{ presentation: 'card', headerShown: false }} />
-      <Stack.Screen name="voice-changer" options={{ presentation: 'card', headerShown: false }} />
-      <Stack.Screen name="terms" options={{ presentation: 'card', headerShown: false }} />
-    </Stack>
+    <View style={{ flex: 1, backgroundColor: colors.background }}>
+      <StatusBar style={isDark ? 'light' : 'dark'} />
+      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.background } }}>
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="(auth)/welcome" options={{ headerShown: false }} />
+        <Stack.Screen name="(auth)/sign-in" options={{ headerShown: false }} />
+        <Stack.Screen name="(auth)/sign-up" options={{ headerShown: false }} />
+        <Stack.Screen name="(auth)/onboarding" options={{ headerShown: false }} />
+        <Stack.Screen name="(auth)/onboarding-languages" options={{ headerShown: false }} />
+        <Stack.Screen name="(auth)/onboarding-permissions" options={{ headerShown: false }} />
+        <Stack.Screen name="auth/callback" options={{ headerShown: false }} />
+        <Stack.Screen name="conversation-summary" options={{ presentation: 'card', headerShown: false }} />
+        <Stack.Screen name="settings" options={{ presentation: 'card', headerShown: false }} />
+        <Stack.Screen name="privacy-data-usage" options={{ presentation: 'card', headerShown: false }} />
+        <Stack.Screen name="voice-library" options={{ presentation: 'card', headerShown: false }} />
+        <Stack.Screen name="voice-clone" options={{ presentation: 'card', headerShown: false }} />
+        <Stack.Screen name="voice-changer" options={{ presentation: 'card', headerShown: false }} />
+        <Stack.Screen name="terms" options={{ presentation: 'card', headerShown: false }} />
+      </Stack>
+    </View>
   );
 }
 

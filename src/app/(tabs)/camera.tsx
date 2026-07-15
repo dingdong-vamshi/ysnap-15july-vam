@@ -12,6 +12,7 @@ import {
   ScrollView,
   Linking,
   Platform,
+  Modal,
 } from 'react-native';
 import { CameraView, useCameraPermissions, FlashMode } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
@@ -26,6 +27,9 @@ import { typography } from '@/constants/typography';
 import { callEdgeFunction, supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 import { getLanguageName } from '@/constants/languages';
+import { generateUUID } from '../../utils/uuid';
+import { useCreateActivity, useActivityHistoryList, useDeleteActivity } from '../../hooks/useActivityHistory';
+import { historyService } from '../../services/historyService';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -34,6 +38,13 @@ type CameraMode = 'ocr' | 'food' | 'menu';
 export default function CameraScreen() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
+
+  const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
+  const [historyVisible, setHistoryVisible] = useState(false);
+
+  const createActivityMutation = useCreateActivity();
+  const deleteActivityMutation = useDeleteActivity();
+  const { data: history = [], isLoading: loadingHistory } = useActivityHistoryList({ tool: 'camera', limit: 5 });
 
   // Permissions hook
   const [permission, requestPermission] = useCameraPermissions();
@@ -219,7 +230,7 @@ export default function CameraScreen() {
       if (error || !data) throw error || new Error('The camera analysis returned no result.');
 
       const food = data.food_info;
-      setAnalysisResult({
+      const resVal = {
         originalText: data.ocr_text || food?.name || data.analysis || 'No readable text detected',
         translatedText: data.translated_text || food?.translated_name || data.analysis || '',
         foodInfo: food ? {
@@ -240,7 +251,52 @@ export default function CameraScreen() {
           w: Number(box.width || 0) * 0.36,
           h: Number(box.height || 0) * 0.64,
         })) : [],
-      });
+      };
+      setAnalysisResult(resVal);
+
+      // Save to unified activity_history in Supabase
+      if (user) {
+        try {
+          const titleText = mode === 'food' 
+            ? `Food Scan: ${food?.translated_name || food?.name || 'Detected food'}`
+            : mode === 'menu' 
+              ? 'Menu Scan Translation' 
+              : 'OCR Text Scan Translation';
+
+          const activity = await createActivityMutation.mutateAsync({
+            client_request_id: currentRequestId,
+            tool: 'camera',
+            operation_type: mode,
+            title: titleText,
+            source_text: resVal.originalText,
+            translated_text: resVal.translatedText,
+            metadata: {
+              mode,
+              confidence: food?.confidence ? Math.round(Number(food.confidence)) : undefined,
+              calories: food?.calories ? Number(food.calories) : undefined,
+              protein: food?.protein || undefined,
+              carbs: food?.carbs || undefined,
+              fat: food?.fat || undefined,
+              allergens: food?.allergens || undefined,
+            }
+          });
+
+          // Upload local captured/picked image file to history-files storage
+          const imgResponse = await fetch(uri);
+          const imgBlob = await imgResponse.blob();
+          const imgPath = await historyService.uploadFile('camera', activity.id, 'captured.jpg', imgBlob, mimeType);
+
+          await historyService.updateActivity(activity.id, {
+            input_asset_path: imgPath,
+          });
+        } catch (historyErr) {
+          console.warn('Failed to save camera scan to unified history or upload image:', historyErr);
+        }
+      }
+
+      // Generate a fresh request ID for the next capture
+      setCurrentRequestId(generateUUID());
+
       queryClient.invalidateQueries({ queryKey: ['recentSessions', user.id] });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {
@@ -265,6 +321,80 @@ export default function CameraScreen() {
       ? `${analysisResult.foodInfo.name} -> ${analysisResult.foodInfo.translatedName}`
       : analysisResult?.translatedText;
     Alert.alert('Copied to Clipboard', textToCopy);
+  };
+
+  const handleSelectHistoryItem = async (item: any) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setHistoryVisible(false);
+    
+    // Set Mode
+    if (item.operation_type === 'food' || item.operation_type === 'menu' || item.operation_type === 'ocr') {
+      setMode(item.operation_type as CameraMode);
+    }
+    
+    // Set Analysis Result
+    setAnalysisResult({
+      originalText: item.source_text || '',
+      translatedText: item.translated_text || '',
+      foodInfo: item.operation_type === 'food' ? {
+        name: item.source_text || '',
+        translatedName: item.translated_text || '',
+        calories: Number(item.metadata?.calories || 0),
+        protein: item.metadata?.protein || 'Unknown',
+        carbs: item.metadata?.carbs || 'Unknown',
+        fat: item.metadata?.fat || 'Unknown',
+        allergens: Array.isArray(item.metadata?.allergens) ? item.metadata?.allergens : [],
+        confidence: Number(item.metadata?.confidence || 100),
+      } : undefined,
+      ocrBoxes: []
+    });
+
+    // Set Captured Image
+    if (item.input_asset_path) {
+      try {
+        const url = await historyService.getSignedUrl(item.input_asset_path);
+        if (url) {
+          setCapturedImage(url);
+        }
+      } catch (err) {
+        console.warn('Failed to load history image asset:', err);
+        setCapturedImage(null);
+      }
+    } else {
+      setCapturedImage(null);
+    }
+  };
+
+  const handleDeleteHistoryItem = (itemId: string) => {
+    Alert.alert(
+      'Delete History Item',
+      'Are you sure you want to delete this scan from your history?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              await deleteActivityMutation.mutateAsync(itemId);
+              Alert.alert('Success', 'History item deleted.');
+            } catch (err: any) {
+              Alert.alert('Deletion Error', err.message || 'Failed to delete history item.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleExportHistoryItem = async (item: any) => {
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      await historyService.exportActivity(item);
+    } catch (err: any) {
+      Alert.alert('Export Error', err.message || 'Failed to export scan.');
+    }
   };
 
   return (
@@ -486,9 +616,66 @@ export default function CameraScreen() {
             </TouchableOpacity>
           )}
 
-          <View style={styles.spacerBtn} />
+          <TouchableOpacity style={styles.historyBtn} onPress={() => setHistoryVisible(true)}>
+            <Ionicons name="time-outline" size={24} color={colors.textPrimary} />
+          </TouchableOpacity>
         </View>
       )}
+
+      {/* History Slide-up Modal */}
+      <Modal
+        visible={historyVisible}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setHistoryVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Recent Camera Scans</Text>
+              <TouchableOpacity onPress={() => setHistoryVisible(false)} style={styles.modalCloseBtn}>
+                <Ionicons name="close" size={24} color={colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.historyList} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+              {loadingHistory ? (
+                <ActivityIndicator color={colors.primary} style={{ marginVertical: 30 }} />
+              ) : history && history.length > 0 ? (
+                history.map((item) => (
+                  <View key={item.id} style={styles.historyCard}>
+                    <TouchableOpacity style={styles.historyCardBody} onPress={() => handleSelectHistoryItem(item)}>
+                      <View style={styles.historyCardHeader}>
+                        <Text style={styles.historyCardMeta}>
+                          {item.operation_type?.toUpperCase() || 'SCAN'}
+                        </Text>
+                        <Text style={styles.historyCardTime}>
+                          {item.created_at ? new Date(item.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''}
+                        </Text>
+                      </View>
+                      <Text style={styles.historySourceText} numberOfLines={1}>
+                        {item.title}
+                      </Text>
+                      <Text style={styles.historyTranslatedText} numberOfLines={1}>
+                        {item.translated_text || ''}
+                      </Text>
+                    </TouchableOpacity>
+                    <View style={styles.historyCardActions}>
+                      <TouchableOpacity style={styles.historyActionBtn} onPress={() => handleExportHistoryItem(item)}>
+                        <Ionicons name="download-outline" size={16} color={colors.textSecondary} />
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.historyActionBtn} onPress={() => handleDeleteHistoryItem(item.id)}>
+                        <Ionicons name="trash-outline" size={16} color={colors.error} />
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))
+              ) : (
+                <Text style={styles.emptyHistoryText}>No recent scans in history.</Text>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -911,5 +1098,112 @@ const styles = StyleSheet.create({
   },
   spacerBtn: {
     width: 52,
+  },
+  historyBtn: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+    ...shadows.sm,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContainer: {
+    backgroundColor: colors.background,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '80%',
+    paddingTop: 16,
+    paddingHorizontal: 16,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderColor: colors.border,
+    paddingBottom: 12,
+    marginBottom: 12,
+  },
+  modalTitle: {
+    ...typography.heading3,
+    color: colors.textPrimary,
+  },
+  modalCloseBtn: {
+    padding: 4,
+  },
+  historyList: {
+    flex: 1,
+  },
+  historyContainer: {
+    marginTop: 10,
+    marginBottom: 20,
+  },
+  historyCard: {
+    backgroundColor: colors.surfaceSoft,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 16,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  historyCardBody: {
+    flex: 1,
+    marginRight: 12,
+  },
+  historyCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  historyCardMeta: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    fontWeight: '700',
+    color: colors.textMuted,
+  },
+  historyCardTime: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    color: colors.textSubtle,
+  },
+  historySourceText: {
+    fontSize: 14,
+    fontFamily: typography.bodyMedium.fontFamily,
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  historyTranslatedText: {
+    fontSize: 14,
+    fontFamily: typography.body.fontFamily,
+    color: colors.accentPurple,
+  },
+  historyCardActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  historyActionBtn: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  emptyHistoryText: {
+    fontSize: 14,
+    fontFamily: typography.body.fontFamily,
+    color: colors.textSubtle,
+    textAlign: 'center',
+    marginTop: 30,
   },
 });

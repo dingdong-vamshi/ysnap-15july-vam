@@ -15,8 +15,12 @@ import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
-import { RecordingPresets, AudioModule } from 'expo-audio';
+import { RecordingPresets, AudioModule, useAudioPlayer } from 'expo-audio';
 import { useAppAudioRecorder } from '../utils/audioRecorder';
+import { generateUUID } from '../utils/uuid';
+import { useCreateActivity, useActivityHistoryList, useDeleteActivity } from '../hooks/useActivityHistory';
+import { historyService } from '../services/historyService';
+
 
 import { colors } from '../constants/colors';
 import { spacing, layout, shadows } from '../constants/spacing';
@@ -30,6 +34,14 @@ export default function VoiceCloneScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const queryClient = useQueryClient();
+
+  const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
+  const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
+  const historyAudioPlayer = useAudioPlayer('');
+
+  const createActivityMutation = useCreateActivity();
+  const deleteActivityMutation = useDeleteActivity();
+  const { data: history = [], isLoading: loadingHistory } = useActivityHistoryList({ tool: 'voice_clone', limit: 5 });
 
   // Workflow steps: 'consent' | 'record' | 'processing' | 'ready'
   const [step, setStep] = useState<'consent' | 'record' | 'processing' | 'ready'>('consent');
@@ -191,6 +203,39 @@ export default function VoiceCloneScreen() {
       
       setCloningProgress(80);
       setCloningStatus('Registering custom voice model...');
+
+      // Save to unified activity_history in Supabase
+      if (user && voiceProfile) {
+        const activity = await createActivityMutation.mutateAsync({
+          client_request_id: currentRequestId,
+          tool: 'voice_clone',
+          operation_type: 'voice_clone',
+          title: `Voice Clone: ${customVoiceName}`,
+          source_text: `Accent: ${selectedAccent}`,
+          duration_seconds: recordDuration || undefined,
+          metadata: {
+            voice_profile_id: voiceProfile.id,
+            provider_voice_id: voiceProfile.provider_voice_id,
+            display_name: voiceProfile.display_name,
+            accent_info: voiceProfile.accent_info
+          }
+        });
+
+        try {
+          const sampleResponse = await fetch(recordedUri);
+          const sampleBlob = await sampleResponse.blob();
+          const samplePath = await historyService.uploadFile('voice_clone', activity.id, 'sample.m4a', sampleBlob, 'audio/mp4');
+
+          await historyService.updateActivity(activity.id, {
+            input_asset_path: samplePath,
+          });
+        } catch (uploadErr) {
+          console.warn('Failed to archive voice clone sample to storage:', uploadErr);
+        }
+      }
+
+      // Refresh request ID for next clone
+      setCurrentRequestId(generateUUID());
       
       setCloningProgress(100);
       setCloningStatus('Voice clone ready!');
@@ -224,6 +269,75 @@ export default function VoiceCloneScreen() {
       setConsentPrivacy(!consentPrivacy);
     }
   };
+
+  const handleSelectHistoryItem = (item: any) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setStep('ready');
+    setCustomVoiceName(item.title?.replace('Voice Clone: ', '') || 'My Voice');
+    setSelectedAccent(item.source_text?.replace('Accent: ', '') || 'US Accent');
+  };
+
+  const handleDeleteHistoryItem = (itemId: string) => {
+    Alert.alert(
+      'Delete History Item',
+      'Are you sure you want to delete this voice clone from your history?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              await deleteActivityMutation.mutateAsync(itemId);
+              Alert.alert('Success', 'History item deleted.');
+            } catch (err: any) {
+              Alert.alert('Deletion Error', err.message || 'Failed to delete history item.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleExportHistoryItem = async (item: any, mode: 'text' | 'audio' = 'text') => {
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      await historyService.exportActivity(item, mode);
+    } catch (err: any) {
+      Alert.alert('Export Error', err.message || 'Failed to export voice clone.');
+    }
+  };
+
+  const handlePlayHistoryAudio = async (item: any) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (playingHistoryId === item.id) {
+      historyAudioPlayer.pause();
+      setPlayingHistoryId(null);
+      return;
+    }
+    if (!item.input_asset_path) {
+      Alert.alert('Audio Unavailable', 'No audio sample is stored for this item.');
+      return;
+    }
+    try {
+      const url = await historyService.getSignedUrl(item.input_asset_path);
+      if (url) {
+        setPlayingHistoryId(item.id);
+        historyAudioPlayer.replace({ uri: url });
+        historyAudioPlayer.play();
+      }
+    } catch (err: any) {
+      console.error(err);
+      Alert.alert('Playback Error', 'Failed to play sample audio.');
+    }
+  };
+
+  useEffect(() => {
+    if (playingHistoryId && !historyAudioPlayer.playing && historyAudioPlayer.currentTime >= historyAudioPlayer.duration - 0.2) {
+      setPlayingHistoryId(null);
+    }
+  }, [historyAudioPlayer.playing, historyAudioPlayer.currentTime]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -456,6 +570,48 @@ export default function VoiceCloneScreen() {
           </View>
         )}
 
+        {/* Unified Tool History */}
+        <View style={styles.historyContainer}>
+          <Text style={styles.sectionTitle}>Recent History</Text>
+          {loadingHistory ? (
+            <ActivityIndicator color={colors.primary} style={{ marginVertical: 20 }} />
+          ) : history && history.length > 0 ? (
+            history.map((item) => (
+              <View key={item.id} style={styles.historyCard}>
+                <Pressable style={styles.historyCardBody} onPress={() => handleSelectHistoryItem(item)}>
+                  <View style={styles.historyCardHeader}>
+                    <Text style={styles.historyCardMeta}>
+                      {item.title}
+                    </Text>
+                    <Text style={styles.historyCardTime}>
+                      {item.created_at ? new Date(item.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''}
+                    </Text>
+                  </View>
+                  <Text style={styles.historySourceText} numberOfLines={2}>
+                    {item.source_text}
+                  </Text>
+                </Pressable>
+                <View style={styles.historyCardActions}>
+                  <Pressable style={styles.historyActionBtn} onPress={() => handlePlayHistoryAudio(item)}>
+                    <Ionicons 
+                      name={playingHistoryId === item.id ? 'pause-outline' : 'play-outline'} 
+                      size={16} 
+                      color={playingHistoryId === item.id ? colors.accentPurple : colors.textSecondary} 
+                    />
+                  </Pressable>
+                  <Pressable style={styles.historyActionBtn} onPress={() => handleExportHistoryItem(item, 'text')}>
+                    <Ionicons name="download-outline" size={16} color={colors.textSecondary} />
+                  </Pressable>
+                  <Pressable style={styles.historyActionBtn} onPress={() => handleDeleteHistoryItem(item.id)}>
+                    <Ionicons name="trash-outline" size={16} color={colors.error} />
+                  </Pressable>
+                </View>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.emptyHistoryText}>No voice clone history yet. Consent and record a sample to clone your voice.</Text>
+          )}
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -752,5 +908,73 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: colors.textPrimary,
     backgroundColor: colors.backgroundSoft,
+  },
+  historyContainer: {
+    marginTop: 30,
+    marginBottom: 20,
+  },
+  historyCard: {
+    backgroundColor: colors.surfaceSoft,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 16,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  historyCardBody: {
+    flex: 1,
+    marginRight: 12,
+  },
+  historyCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  historyCardMeta: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    fontWeight: '700',
+    color: colors.textMuted,
+  },
+  historyCardTime: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    color: colors.textSubtle,
+  },
+  historySourceText: {
+    fontSize: 14,
+    fontFamily: typography.bodyMedium.fontFamily,
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  historyCardActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  historyActionBtn: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  emptyHistoryText: {
+    fontSize: 14,
+    fontFamily: typography.body.fontFamily,
+    color: colors.textSubtle,
+    textAlign: 'center',
+    marginTop: 10,
+  },
+  sectionTitle: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    fontWeight: typography.captionMedium.fontWeight,
+    color: colors.accentPurple,
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+    marginBottom: 12,
   },
 });

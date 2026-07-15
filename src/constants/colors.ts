@@ -1,8 +1,9 @@
 /**
  * YSnap Design System — Color Tokens
- * Cal AI-inspired white-first palette with plum-black primary controls
+ * Premium, white-first theme for light mode, and dark plum-black theme for dark mode.
  */
-export const colors = {
+
+export const lightColors = {
   // Backgrounds
   background: '#FFFFFF',
   backgroundSoft: '#F8F8FC',
@@ -55,6 +56,79 @@ export const colors = {
   // Skeleton
   skeletonBase: '#F3F2F6',
   skeletonHighlight: '#E9E7EC',
-} as const;
+};
 
-export type ColorToken = keyof typeof colors;
+export const darkColors: typeof lightColors = {
+  // Backgrounds
+  background: '#0B0A0B',
+  backgroundSoft: '#161416',
+  backgroundMuted: '#201D20',
+
+  // Surfaces
+  surface: '#161416',
+  surfaceSoft: '#201D20',
+  surfaceSelected: '#FFFFFF',
+  surfaceWarning: '#2C1E0A',
+  surfaceSuccess: '#0D2E1F',
+  surfaceError: '#351114',
+
+  // Text
+  textPrimary: '#FFFFFF',
+  textSecondary: '#B9B9C0',
+  textMuted: '#9B9BA1',
+  textSubtle: '#7B7B82',
+  textInverse: '#0B0A0B',
+
+  // Primary
+  primary: '#FFFFFF',
+  primaryPressed: '#E7E6EB',
+  disabled: '#4A494E',
+
+  // Borders
+  border: '#2C2B30',
+  borderStrong: '#3E3D42',
+  borderFocused: '#FFFFFF',
+
+  // Accents
+  accentBlue: '#5B8DEF',
+  accentPurple: '#9A8CE6',
+  accentGreen: '#4D9A76',
+  accentOrange: '#E2A05C',
+  accentCoral: '#D95C67',
+
+  // Semantic
+  success: '#46A376',
+  successLight: '#0D2E1F',
+  warning: '#C6882C',
+  warningLight: '#2C1E0A',
+  error: '#DC5361',
+  errorLight: '#351114',
+
+  // Overlays
+  overlay: 'rgba(0, 0, 0, 0.6)',
+  overlayLight: 'rgba(255, 255, 255, 0.08)',
+
+  // Skeleton
+  skeletonBase: '#201D20',
+  skeletonHighlight: '#2C292C',
+};
+
+// Global mutable theme state
+export let currentThemeMode: 'light' | 'dark' = 'light';
+
+export function setThemeMode(mode: 'light' | 'dark') {
+  currentThemeMode = mode;
+}
+
+export function getActiveColors() {
+  return currentThemeMode === 'dark' ? darkColors : lightColors;
+}
+
+// Export colors as a Proxy that resolves properties to the active theme dynamically
+export const colors = new Proxy({} as typeof lightColors, {
+  get(target, prop) {
+    return getActiveColors()[prop as keyof typeof lightColors];
+  }
+});
+
+export type ColorToken = keyof typeof lightColors;

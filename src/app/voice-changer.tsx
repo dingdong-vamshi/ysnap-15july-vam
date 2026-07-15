@@ -13,7 +13,7 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { useAudioPlayer, RecordingPresets, AudioModule } from 'expo-audio';
 import { useAppAudioRecorder } from '../utils/audioRecorder';
@@ -26,6 +26,9 @@ import { typography } from '../constants/typography';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { elevenLabsService } from '../services/elevenLabs';
+import { generateUUID } from '../utils/uuid';
+import { useCreateActivity, useActivityHistoryList, useDeleteActivity } from '../hooks/useActivityHistory';
+import { historyService } from '../services/historyService';
 
 interface VoiceOption {
   id: string;
@@ -36,6 +39,15 @@ interface VoiceOption {
 export default function VoiceChangerScreen() {
   const router = useRouter();
   const { user } = useAuth();
+  const queryClient = useQueryClient();
+
+  const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
+  const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
+  const historyAudioPlayer = useAudioPlayer('');
+
+  const createActivityMutation = useCreateActivity();
+  const deleteActivityMutation = useDeleteActivity();
+  const { data: history = [], isLoading: loadingHistory } = useActivityHistoryList({ tool: 'accent_changer', limit: 5 });
 
   // Selected Target Voice
   const [selectedVoiceId, setSelectedVoiceId] = useState('CwhRBWXzGAHq8TQ4Fs17');
@@ -204,6 +216,45 @@ export default function VoiceChangerScreen() {
         setIsRealConnected(true);
         setFlowState('ready');
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
+        // Save to unified activity_history in Supabase
+        if (user) {
+          const selectedVoiceName = voiceOptions.find(v => v.id === selectedVoiceId)?.name || 'Selected voice';
+          const activity = await createActivityMutation.mutateAsync({
+            client_request_id: currentRequestId,
+            tool: 'accent_changer',
+            operation_type: 'accent_changer',
+            title: `Voice morph to ${selectedVoiceName}`,
+            source_text: res.sourceText || undefined,
+            duration_seconds: recordingSeconds || undefined,
+            metadata: {
+              voice_id: targetVoiceId,
+              voice_name: selectedVoiceName,
+            }
+          });
+
+          try {
+            // Upload local input voice file
+            const inputResponse = await fetch(recordedUri);
+            const inputBlob = await inputResponse.blob();
+            const inputPath = await historyService.uploadFile('accent_changer', activity.id, 'input.m4a', inputBlob, 'audio/mp4');
+
+            // Upload morph output voice file
+            const outputResponse = await fetch(res.url);
+            const outputBlob = await outputResponse.blob();
+            const outputPath = await historyService.uploadFile('accent_changer', activity.id, 'output.mp3', outputBlob, 'audio/mpeg');
+
+            await historyService.updateActivity(activity.id, {
+              input_asset_path: inputPath,
+              output_asset_path: outputPath,
+            });
+          } catch (uploadErr) {
+            console.warn('Failed to archive voice changer assets to storage:', uploadErr);
+          }
+        }
+
+        // Refresh request ID for next conversion
+        setCurrentRequestId(generateUUID());
       } else {
         throw new Error('TTS Voice changer failed: no output url');
       }
@@ -265,6 +316,85 @@ export default function VoiceChangerScreen() {
       Alert.alert('Download Failed', error instanceof Error ? error.message : 'Could not save the transformed audio.');
     }
   };
+
+  const handleSelectHistoryItem = (item: any) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setFlowState('ready');
+    setSourceTranscript(item.source_text || 'Transformed voice');
+    setSelectedVoiceId(item.metadata?.voice_id || 'CwhRBWXzGAHq8TQ4Fs17');
+    if (item.output_asset_path) {
+      historyService.getSignedUrl(item.output_asset_path).then((url) => {
+        if (url) {
+          setOutputAudioUrl(url);
+          player.replace({ uri: url });
+        }
+      });
+    } else {
+      setOutputAudioUrl(null);
+    }
+  };
+
+  const handleDeleteHistoryItem = (itemId: string) => {
+    Alert.alert(
+      'Delete History Item',
+      'Are you sure you want to delete this voice morph from your history?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              await deleteActivityMutation.mutateAsync(itemId);
+              Alert.alert('Success', 'History item deleted.');
+            } catch (err: any) {
+              Alert.alert('Deletion Error', err.message || 'Failed to delete history item.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleExportHistoryItem = async (item: any, mode: 'text' | 'audio' = 'text') => {
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      await historyService.exportActivity(item, mode);
+    } catch (err: any) {
+      Alert.alert('Export Error', err.message || 'Failed to export transformed voice.');
+    }
+  };
+
+  const handlePlayHistoryAudio = async (item: any) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (playingHistoryId === item.id) {
+      historyAudioPlayer.pause();
+      setPlayingHistoryId(null);
+      return;
+    }
+    if (!item.output_asset_path) {
+      Alert.alert('Audio Unavailable', 'No audio playback is stored for this item.');
+      return;
+    }
+    try {
+      const url = await historyService.getSignedUrl(item.output_asset_path);
+      if (url) {
+        setPlayingHistoryId(item.id);
+        historyAudioPlayer.replace({ uri: url });
+        historyAudioPlayer.play();
+      }
+    } catch (err: any) {
+      console.error(err);
+      Alert.alert('Playback Error', 'Failed to play history audio.');
+    }
+  };
+
+  useEffect(() => {
+    if (playingHistoryId && !historyAudioPlayer.playing && historyAudioPlayer.currentTime >= historyAudioPlayer.duration - 0.2) {
+      setPlayingHistoryId(null);
+    }
+  }, [historyAudioPlayer.playing, historyAudioPlayer.currentTime]);
 
   const selectedVoiceName = voiceOptions.find(v => v.id === selectedVoiceId)?.name || 'Selected voice';
 
@@ -434,7 +564,48 @@ export default function VoiceChangerScreen() {
             </View>
           </View>
         )}
-
+        {/* Unified Tool History */}
+        <View style={styles.historyContainer}>
+          <Text style={styles.sectionTitle}>Recent History</Text>
+          {loadingHistory ? (
+            <ActivityIndicator color={colors.primary} style={{ marginVertical: 20 }} />
+          ) : history && history.length > 0 ? (
+            history.map((item) => (
+              <View key={item.id} style={styles.historyCard}>
+                <Pressable style={styles.historyCardBody} onPress={() => handleSelectHistoryItem(item)}>
+                  <View style={styles.historyCardHeader}>
+                    <Text style={styles.historyCardMeta}>
+                      MORPH TO {item.metadata?.voice_name?.toUpperCase() || 'TARGET VOICE'}
+                    </Text>
+                    <Text style={styles.historyCardTime}>
+                      {item.created_at ? new Date(item.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''}
+                    </Text>
+                  </View>
+                  <Text style={styles.historySourceText} numberOfLines={2}>
+                    {item.source_text || 'Transformed voice clip'}
+                  </Text>
+                </Pressable>
+                <View style={styles.historyCardActions}>
+                  <Pressable style={styles.historyActionBtn} onPress={() => handlePlayHistoryAudio(item)}>
+                    <Ionicons 
+                      name={playingHistoryId === item.id ? 'pause-outline' : 'play-outline'} 
+                      size={16} 
+                      color={playingHistoryId === item.id ? colors.accentPurple : colors.textSecondary} 
+                    />
+                  </Pressable>
+                  <Pressable style={styles.historyActionBtn} onPress={() => handleExportHistoryItem(item, 'text')}>
+                    <Ionicons name="download-outline" size={16} color={colors.textSecondary} />
+                  </Pressable>
+                  <Pressable style={styles.historyActionBtn} onPress={() => handleDeleteHistoryItem(item.id)}>
+                    <Ionicons name="trash-outline" size={16} color={colors.error} />
+                  </Pressable>
+                </View>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.emptyHistoryText}>No accent changer history yet. Convert a voice clip to see it here.</Text>
+          )}
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -759,5 +930,64 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.textSecondary,
     letterSpacing: 0.5,
+  },
+  historyContainer: {
+    marginTop: 30,
+    marginBottom: 20,
+  },
+  historyCard: {
+    backgroundColor: colors.surfaceSoft,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 16,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  historyCardBody: {
+    flex: 1,
+    marginRight: 12,
+  },
+  historyCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  historyCardMeta: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    fontWeight: '700',
+    color: colors.textMuted,
+  },
+  historyCardTime: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    color: colors.textSubtle,
+  },
+  historySourceText: {
+    fontSize: 14,
+    fontFamily: typography.bodyMedium.fontFamily,
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  historyCardActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  historyActionBtn: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  emptyHistoryText: {
+    fontSize: 14,
+    fontFamily: typography.body.fontFamily,
+    color: colors.textSubtle,
+    textAlign: 'center',
+    marginTop: 10,
   },
 });

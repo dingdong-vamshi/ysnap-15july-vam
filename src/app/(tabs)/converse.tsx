@@ -15,7 +15,7 @@ import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAudioPlayer, RecordingPresets, AudioModule } from 'expo-audio';
 import { useAppAudioRecorder, useAppAudioRecorderState } from '../../utils/audioRecorder';
 
@@ -26,6 +26,9 @@ import { languages, getLanguageName } from '../../constants/languages';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 import { elevenLabsService } from '../../services/elevenLabs';
+import { generateUUID } from '../../utils/uuid';
+import { useCreateActivity, useActivityHistoryList, useDeleteActivity } from '../../hooks/useActivityHistory';
+import { historyService } from '../../services/historyService';
 
 interface TranscriptSegment {
   speaker: 'top' | 'bottom';
@@ -39,6 +42,15 @@ interface TranscriptSegment {
 export default function ConverseTab() {
   const router = useRouter();
   const { user } = useAuth();
+  const queryClient = useQueryClient();
+
+  const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
+  const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
+  const historyAudioPlayer = useAudioPlayer('');
+
+  const createActivityMutation = useCreateActivity();
+  const deleteActivityMutation = useDeleteActivity();
+  const { data: history = [], isLoading: loadingHistory } = useActivityHistoryList({ tool: 'conversation', limit: 5 });
 
   // Language Setup
   const [topLanguage, setTopLanguage] = useState('es');
@@ -133,7 +145,36 @@ export default function ConverseTab() {
       if (sessionErr) throw sessionErr;
       return session;
     },
-    onSuccess: (session) => {
+    onSuccess: async (session) => {
+      // Save to unified activity_history in Supabase
+      if (user && session) {
+        try {
+          await createActivityMutation.mutateAsync({
+            client_request_id: currentRequestId,
+            tool: 'conversation',
+            operation_type: 'conversation_session',
+            title: `Conversation (${getLanguageName(topLanguage)} / ${getLanguageName(bottomLanguage)})`,
+            transcript: transcripts.map(t => ({
+              speaker: t.speaker === 'bottom' ? 'A' : 'B',
+              language: t.sourceLang,
+              source_text: t.sourceText,
+              translated_text: t.translatedText,
+            })),
+            metadata: {
+              session_id: session.id,
+              totalSegments: transcripts.length,
+              isFaceToFace,
+              realtimeMode
+            }
+          });
+        } catch (historyErr) {
+          console.error('Failed to save conversation session to unified history:', historyErr);
+        }
+      }
+
+      // Generate a fresh request ID for the next conversation
+      setCurrentRequestId(generateUUID());
+
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert('Session Saved', 'The bilingual transcript and summary are ready.', [
         {
@@ -292,6 +333,54 @@ export default function ConverseTab() {
       setBottomLanguage(code);
     }
     setActiveLangModal(null);
+  };
+
+  const handleSelectHistoryItem = (item: any) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    sessionIdRef.current = item.metadata?.session_id || null;
+    if (item.transcript && Array.isArray(item.transcript)) {
+      const segments: TranscriptSegment[] = item.transcript.map((t: any) => ({
+        speaker: t.speaker === 'A' ? 'bottom' : 'top',
+        sourceText: t.source_text,
+        translatedText: t.translated_text,
+        sourceLang: t.language,
+        targetLang: t.language === topLanguage ? bottomLanguage : topLanguage,
+        timestamp: new Date(),
+      }));
+      setTranscripts(segments);
+    }
+  };
+
+  const handleDeleteHistoryItem = (itemId: string) => {
+    Alert.alert(
+      'Delete History Item',
+      'Are you sure you want to delete this conversation from your history?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              await deleteActivityMutation.mutateAsync(itemId);
+              Alert.alert('Success', 'History item deleted.');
+            } catch (err: any) {
+              Alert.alert('Deletion Error', err.message || 'Failed to delete history item.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleExportHistoryItem = async (item: any) => {
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      await historyService.exportActivity(item);
+    } catch (err: any) {
+      Alert.alert('Export Error', err.message || 'Failed to export conversation.');
+    }
   };
 
   return (
@@ -521,10 +610,39 @@ export default function ConverseTab() {
             </View>
           )}
           {transcripts.length === 0 && !activeSpeaker && (
-            <View style={styles.emptyTranscriptContainer}>
-              <Text style={styles.emptyTranscriptText}>
-                Tap microphone to begin speaking
-              </Text>
+            <View style={styles.historyContainer}>
+              <Text style={styles.sectionHeader}>Recent Conversations</Text>
+              {loadingHistory ? (
+                <ActivityIndicator color={colors.primary} style={{ marginVertical: 20 }} />
+              ) : history && history.length > 0 ? (
+                history.map((item) => (
+                  <View key={item.id} style={styles.historyCard}>
+                    <Pressable style={styles.historyCardBody} onPress={() => handleSelectHistoryItem(item)}>
+                      <View style={styles.historyCardHeader}>
+                        <Text style={styles.historyCardMeta} numberOfLines={1}>
+                          {item.title}
+                        </Text>
+                        <Text style={styles.historyCardTime}>
+                          {item.created_at ? new Date(item.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''}
+                        </Text>
+                      </View>
+                      <Text style={styles.historySourceText} numberOfLines={2}>
+                        {Array.isArray(item.transcript) ? `${item.transcript.length} turns` : 'Conversation session'}
+                      </Text>
+                    </Pressable>
+                    <View style={styles.historyCardActions}>
+                      <Pressable style={styles.historyActionBtn} onPress={() => handleExportHistoryItem(item)}>
+                        <Ionicons name="download-outline" size={16} color={colors.textSecondary} />
+                      </Pressable>
+                      <Pressable style={styles.historyActionBtn} onPress={() => handleDeleteHistoryItem(item.id)}>
+                        <Ionicons name="trash-outline" size={16} color={colors.error} />
+                      </Pressable>
+                    </View>
+                  </View>
+                ))
+              ) : (
+                <Text style={styles.emptyHistoryText}>No past conversations. Tap mic to begin speaking.</Text>
+              )}
             </View>
           )}
         </ScrollView>
@@ -913,5 +1031,75 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 11,
     fontWeight: '600',
+  },
+  historyContainer: {
+    marginTop: 20,
+    marginBottom: 20,
+    paddingHorizontal: 16,
+  },
+  historyCard: {
+    backgroundColor: colors.surfaceSoft,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 16,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  historyCardBody: {
+    flex: 1,
+    marginRight: 12,
+  },
+  historyCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  historyCardMeta: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    fontWeight: '700',
+    color: colors.textMuted,
+    flex: 1,
+  },
+  historyCardTime: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    color: colors.textSubtle,
+  },
+  historySourceText: {
+    fontSize: 14,
+    fontFamily: typography.bodyMedium.fontFamily,
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  historyCardActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  historyActionBtn: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  emptyHistoryText: {
+    fontSize: 14,
+    fontFamily: typography.body.fontFamily,
+    color: colors.textSubtle,
+    textAlign: 'center',
+    marginTop: 10,
+  },
+  sectionHeader: {
+    fontSize: 14,
+    fontFamily: typography.captionMedium.fontFamily,
+    fontWeight: '700',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 1.5,
+    marginBottom: 10,
   },
 });

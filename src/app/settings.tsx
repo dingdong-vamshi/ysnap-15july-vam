@@ -17,8 +17,9 @@ import { demoProfileStore } from '../utils/tempOnboardingStore';
 import { useRouter } from 'expo-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
+import { useTheme } from '../contexts/ThemeContext';
 
-import { colors } from '../constants/colors';
+import { colors, lightColors } from '../constants/colors';
 import { spacing, layout, shadows } from '../constants/spacing';
 import { typography } from '../constants/typography';
 import { supabase } from '../lib/supabase';
@@ -29,6 +30,17 @@ export default function SettingsScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const queryClient = useQueryClient();
+  const { theme: activeTheme, setTheme, isDark } = useTheme();
+  const styles = createStyles(colors);
+
+  const handleBack = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(tabs)/profile');
+    }
+  };
 
   // Fetch User Preferences
   const { data: preferences, isLoading } = useQuery<any>({
@@ -96,9 +108,9 @@ export default function SettingsScreen() {
     updatePreferenceMutation.mutate({ playback_speed: speed });
   };
 
-  const handleSetTheme = (theme: string) => {
+  const handleSetTheme = async (theme: string) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    updatePreferenceMutation.mutate({ theme });
+    await setTheme(theme as any);
   };
 
   const { data: availableVoices = [] } = useQuery({
@@ -176,11 +188,11 @@ export default function SettingsScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar style="dark" />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
       
       {/* Header */}
       <View style={styles.header}>
-        <Pressable style={styles.backBtn} onPress={() => router.back()}>
+        <Pressable style={styles.backBtn} onPress={handleBack}>
           <Ionicons name="arrow-back" size={24} color={colors.textPrimary} />
         </Pressable>
         <Text style={styles.headerTitle}>App Settings</Text>
@@ -300,7 +312,7 @@ export default function SettingsScreen() {
               { id: 'dark', name: 'Dark', icon: 'moon-outline' },
               { id: 'system', name: 'System', icon: 'phone-portrait-outline' },
             ].map((t) => {
-              const isSelected = preferences?.theme === t.id;
+              const isSelected = activeTheme === t.id;
               return (
                 <Pressable
                   key={t.id}
@@ -383,7 +395,7 @@ export default function SettingsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: typeof lightColors) => StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,

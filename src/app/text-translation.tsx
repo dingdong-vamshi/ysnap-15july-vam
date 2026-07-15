@@ -11,6 +11,11 @@ import { typography } from '../constants/typography';
 import { getLanguageByCode, languages } from '../constants/languages';
 import { Ionicons } from '@expo/vector-icons';
 import { TactileButton } from '../components';
+import { generateUUID } from '../utils/uuid';
+import { useCreateActivity, useActivityHistoryList, useDeleteActivity } from '../hooks/useActivityHistory';
+import { historyService } from '../services/historyService';
+import { elevenLabsService } from '../services/elevenLabs';
+import { useAudioPlayer } from 'expo-audio';
 
 const CHAR_LIMIT = 500;
 
@@ -18,6 +23,11 @@ export default function TextTranslationScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const queryClient = useQueryClient();
+
+  const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
+  const [outputAudioUrl, setOutputAudioUrl] = useState<string | null>(null);
+  const player = useAudioPlayer(outputAudioUrl || '');
+  const [playingTts, setPlayingTts] = useState(false);
 
   const [sourceText, setSourceText] = useState('');
   const [translationResult, setTranslationResult] = useState<{
@@ -47,6 +57,10 @@ export default function TextTranslationScreen() {
     enabled: !!user?.id,
   });
 
+  const createActivityMutation = useCreateActivity();
+  const deleteActivityMutation = useDeleteActivity();
+  const { data: history = [], isLoading: loadingHistory } = useActivityHistoryList({ tool: 'type', limit: 5 });
+
   const nativeCode = selectedSourceLanguage ?? profile?.native_language ?? 'en';
   const targetCode = selectedTargetLanguage ?? profile?.primary_target_language ?? 'es';
   const filteredLanguages = languages.filter((language) => {
@@ -74,8 +88,6 @@ export default function TextTranslationScreen() {
     setTranslating(true);
 
     try {
-      // The authenticated Edge Function translates and saves the complete turn
-      // as one server-side operation, including for anonymous demo sessions.
       const { data: translationResultData, error: transError } = await callEdgeFunction<{
         session_id: string;
         translation_item_id: string;
@@ -107,8 +119,32 @@ export default function TextTranslationScreen() {
         notes,
       });
       setIsBookmarked(false);
+      
+      // Save to unified activity_history in Supabase
+      if (user) {
+        await createActivityMutation.mutateAsync({
+          client_request_id: currentRequestId,
+          tool: 'type',
+          operation_type: 'text_translation',
+          title: sourceText.slice(0, 80),
+          source_language: nativeCode,
+          target_language: targetCode,
+          source_text: sourceText,
+          translated_text: translated,
+          metadata: {
+            alternatives,
+            context_notes: notes,
+            transliteration,
+            translation_item_id: translationResultData.translation_item_id
+          }
+        });
+      }
+
+      // Generate a fresh request ID for the next translation
+      setCurrentRequestId(generateUUID());
       setTranslating(false);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      
       const { data: currentUserData } = await supabase.auth.getUser();
       const currentUserId = user?.id || currentUserData.user?.id;
       if (currentUserId) queryClient.invalidateQueries({ queryKey: ['recentSessions', currentUserId] });
@@ -116,6 +152,47 @@ export default function TextTranslationScreen() {
       console.error(e);
       setTranslating(false);
       Alert.alert('Translation Error', e.message || 'Failed to connect to the translation engine. Please try again.');
+    }
+  };
+
+  useEffect(() => {
+    if (playingTts && !player.playing && player.currentTime >= player.duration - 0.2) {
+      setPlayingTts(false);
+    }
+  }, [player.playing, player.currentTime]);
+
+  const handleTtsPlayback = async () => {
+    if (!translationResult?.translated) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    
+    if (playingTts) {
+      player.pause();
+      setPlayingTts(false);
+      return;
+    }
+
+    try {
+      setPlayingTts(true);
+      let audioUrl = outputAudioUrl;
+      if (!audioUrl) {
+        const res = await elevenLabsService.generateSpeech(
+          translationResult.translated,
+          '21m00Tcm4TlvDq8ikWAM',
+          true
+        );
+        if (res && res.url) {
+          audioUrl = res.url;
+          setOutputAudioUrl(res.url);
+        } else {
+          throw new Error('TTS synthesis returned empty URL');
+        }
+      }
+      player.replace({ uri: audioUrl });
+      player.play();
+    } catch (err: any) {
+      console.error(err);
+      Alert.alert('TTS Playback Failed', err.message || 'Error occurred during speech synthesis.');
+      setPlayingTts(false);
     }
   };
 
@@ -161,6 +238,58 @@ export default function TextTranslationScreen() {
     }
   };
 
+  const handleSourceTextChange = (text: string) => {
+    setSourceText(text);
+    setCurrentRequestId(generateUUID());
+    if (!text.trim()) {
+      setTranslationResult(null);
+    }
+  };
+
+  const handleSelectHistoryItem = (item: any) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setSourceText(item.source_text || '');
+    setTranslationResult({
+      id: item.metadata?.translation_item_id,
+      translated: item.translated_text || '',
+      transliteration: item.metadata?.transliteration || '',
+      alternatives: item.metadata?.alternatives || [],
+      notes: item.metadata?.context_notes || '',
+    });
+  };
+
+  const handleDeleteHistoryItem = (itemId: string) => {
+    Alert.alert(
+      'Delete History Item',
+      'Are you sure you want to delete this translation from your history?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              await deleteActivityMutation.mutateAsync(itemId);
+              Alert.alert('Success', 'History item deleted.');
+            } catch (err: any) {
+              Alert.alert('Deletion Error', err.message || 'Failed to delete history item.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleExportHistoryItem = async (item: any) => {
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      await historyService.exportActivity(item);
+    } catch (err: any) {
+      Alert.alert('Export Error', err.message || 'Failed to export translation.');
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style="dark" />
@@ -197,12 +326,12 @@ export default function TextTranslationScreen() {
               multiline
               maxLength={CHAR_LIMIT}
               value={sourceText}
-              onChangeText={setSourceText}
+              onChangeText={handleSourceTextChange}
             />
             <View style={styles.cardFooter}>
               <Text style={styles.charCount}>{sourceText.length} / {CHAR_LIMIT}</Text>
               {sourceText.length > 0 && (
-                <Pressable style={styles.clearButton} onPress={() => setSourceText('')}>
+                <Pressable style={styles.clearButton} onPress={() => handleSourceTextChange('')}>
                   <Ionicons name="close-circle" size={18} color={colors.textMuted} />
                 </Pressable>
               )}
@@ -214,7 +343,7 @@ export default function TextTranslationScreen() {
             title="Translate"
             onPress={handleTranslate}
             loading={translating}
-            disabled={!sourceText.trim()}
+            disabled={!sourceText.trim() || translating}
             style={styles.buttonSpacing}
           />
 
@@ -234,8 +363,12 @@ export default function TextTranslationScreen() {
                         color={isBookmarked ? colors.accentPurple : colors.textMuted} 
                       />
                     </Pressable>
-                    <Pressable style={styles.actionIcon} onPress={() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)}>
-                      <Ionicons name="volume-medium" size={20} color={colors.textMuted} />
+                    <Pressable style={styles.actionIcon} onPress={handleTtsPlayback}>
+                      <Ionicons 
+                        name={playingTts ? "volume-high" : "volume-medium"} 
+                        size={20} 
+                        color={playingTts ? colors.accentPurple : colors.textMuted} 
+                      />
                     </Pressable>
                   </View>
                 </View>
@@ -278,6 +411,41 @@ export default function TextTranslationScreen() {
               )}
             </View>
           )}
+
+          {/* Unified Tool History */}
+          <View style={styles.historyContainer}>
+            <Text style={styles.sectionHeader}>Recent History</Text>
+            {loadingHistory ? (
+              <ActivityIndicator color={colors.primary} style={{ marginVertical: 20 }} />
+            ) : history && history.length > 0 ? (
+              history.map((item) => (
+                <View key={item.id} style={styles.historyCard}>
+                  <Pressable style={styles.historyCardBody} onPress={() => handleSelectHistoryItem(item)}>
+                    <View style={styles.historyCardHeader}>
+                      <Text style={styles.historyCardMeta}>
+                        {item.source_language?.toUpperCase()} → {item.target_language?.toUpperCase()}
+                      </Text>
+                      <Text style={styles.historyCardTime}>
+                        {item.created_at ? new Date(item.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''}
+                      </Text>
+                    </View>
+                    <Text style={styles.historySourceText} numberOfLines={2}>{item.source_text}</Text>
+                    <Text style={styles.historyTranslatedText} numberOfLines={2}>{item.translated_text}</Text>
+                  </Pressable>
+                  <View style={styles.historyCardActions}>
+                    <Pressable style={styles.historyActionBtn} onPress={() => handleExportHistoryItem(item)}>
+                      <Ionicons name="download-outline" size={16} color={colors.textSecondary} />
+                    </Pressable>
+                    <Pressable style={styles.historyActionBtn} onPress={() => handleDeleteHistoryItem(item.id)}>
+                      <Ionicons name="trash-outline" size={16} color={colors.error} />
+                    </Pressable>
+                  </View>
+                </View>
+              ))
+            ) : (
+              <Text style={styles.emptyHistoryText}>No activity yet. Complete a translation to see it here.</Text>
+            )}
+          </View>
         </ScrollView>
       </KeyboardAvoidingView>
 
@@ -633,5 +801,69 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: typography.captionMedium.fontFamily,
     color: colors.textMuted,
+  },
+  historyContainer: {
+    marginTop: 30,
+    marginBottom: 20,
+  },
+  historyCard: {
+    backgroundColor: colors.surfaceSoft,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 16,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  historyCardBody: {
+    flex: 1,
+    marginRight: 12,
+  },
+  historyCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  historyCardMeta: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    fontWeight: '700',
+    color: colors.textMuted,
+  },
+  historyCardTime: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    color: colors.textSubtle,
+  },
+  historySourceText: {
+    fontSize: 14,
+    fontFamily: typography.bodyMedium.fontFamily,
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  historyTranslatedText: {
+    fontSize: 14,
+    fontFamily: typography.body.fontFamily,
+    color: colors.accentPurple,
+  },
+  historyCardActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  historyActionBtn: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  emptyHistoryText: {
+    fontSize: 14,
+    fontFamily: typography.body.fontFamily,
+    color: colors.textSubtle,
+    textAlign: 'center',
+    marginTop: 10,
   },
 });
