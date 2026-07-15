@@ -65,6 +65,12 @@ export interface VisualAnalysisResult {
     visibleIngredients?: string[];
     packageClaims?: string[];
     visibleNutritionText?: string[];
+    estimatedNutrition?: {
+      calories?: number;
+      protein_g?: number;
+      carbs_g?: number;
+      fat_g?: number;
+    };
   };
 
   landmark?: {

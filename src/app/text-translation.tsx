@@ -1,27 +1,46 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TextInput, Pressable, ScrollView, ActivityIndicator, Alert, SafeAreaView, KeyboardAvoidingView, Platform, Modal } from 'react-native';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TextInput,
+  Pressable,
+  ScrollView,
+  ActivityIndicator,
+  Alert,
+  SafeAreaView,
+  KeyboardAvoidingView,
+  Platform,
+  Modal,
+  Clipboard,
+} from 'react-native';
 import { useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase, callEdgeFunction } from '../lib/supabase';
 import { colors } from '../constants/colors';
 import { typography } from '../constants/typography';
 import { getLanguageByCode, languages } from '../constants/languages';
 import { Ionicons } from '@expo/vector-icons';
-import { TactileButton } from '../components';
 import { generateUUID } from '../utils/uuid';
-import { useCreateActivity, useActivityHistoryList, useDeleteActivity } from '../hooks/useActivityHistory';
+import {
+  useCreateActivity,
+  useActivityHistoryList,
+  useDeleteActivity,
+} from '../hooks/useActivityHistory';
 import { historyService } from '../services/historyService';
 import { elevenLabsService } from '../services/elevenLabs';
 import { useAudioPlayer } from 'expo-audio';
+import { useTheme } from '../contexts/ThemeContext';
 
 const CHAR_LIMIT = 500;
 
 export default function TextTranslationScreen() {
   const router = useRouter();
   const { user } = useAuth();
+  const { isDark } = useTheme();
   const queryClient = useQueryClient();
 
   const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
@@ -37,7 +56,7 @@ export default function TextTranslationScreen() {
     alternatives: string[];
     notes: string;
   } | null>(null);
-  
+
   const [translating, setTranslating] = useState(false);
   const [showTransliterationSheet, setShowTransliterationSheet] = useState(false);
   const [isBookmarked, setIsBookmarked] = useState(false);
@@ -59,17 +78,26 @@ export default function TextTranslationScreen() {
 
   const createActivityMutation = useCreateActivity();
   const deleteActivityMutation = useDeleteActivity();
-  const { data: history = [], isLoading: loadingHistory } = useActivityHistoryList({ tool: 'type', limit: 5 });
+  const { data: history = [], isLoading: loadingHistory } = useActivityHistoryList({
+    tool: 'type',
+    limit: 5,
+  });
 
   const nativeCode = selectedSourceLanguage ?? profile?.native_language ?? 'en';
   const targetCode = selectedTargetLanguage ?? profile?.primary_target_language ?? 'es';
+
   const filteredLanguages = languages.filter((language) => {
     const query = languageSearch.trim().toLowerCase();
-    return !query || language.name.toLowerCase().includes(query) ||
-      language.nativeName.toLowerCase().includes(query) || language.code.toLowerCase().includes(query);
+    return (
+      !query ||
+      language.name.toLowerCase().includes(query) ||
+      language.nativeName.toLowerCase().includes(query) ||
+      language.code.toLowerCase().includes(query)
+    );
   });
 
   const selectLanguage = (code: string) => {
+    Haptics.selectionAsync();
     if (languagePicker === 'source') {
       setSelectedSourceLanguage(code);
       if (code === targetCode) setSelectedTargetLanguage(nativeCode);
@@ -79,6 +107,14 @@ export default function TextTranslationScreen() {
     }
     setLanguagePicker(null);
     setLanguageSearch('');
+    setTranslationResult(null);
+  };
+
+  const swapLanguages = () => {
+    Haptics.selectionAsync();
+    const temp = nativeCode;
+    setSelectedSourceLanguage(targetCode);
+    setSelectedTargetLanguage(temp);
     setTranslationResult(null);
   };
 
@@ -119,7 +155,7 @@ export default function TextTranslationScreen() {
         notes,
       });
       setIsBookmarked(false);
-      
+
       // Save to unified activity_history in Supabase
       if (user) {
         await createActivityMutation.mutateAsync({
@@ -135,23 +171,25 @@ export default function TextTranslationScreen() {
             alternatives,
             context_notes: notes,
             transliteration,
-            translation_item_id: translationResultData.translation_item_id
-          }
+            translation_item_id: translationResultData.translation_item_id,
+          },
         });
       }
 
-      // Generate a fresh request ID for the next translation
       setCurrentRequestId(generateUUID());
       setTranslating(false);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      
+
       const { data: currentUserData } = await supabase.auth.getUser();
       const currentUserId = user?.id || currentUserData.user?.id;
       if (currentUserId) queryClient.invalidateQueries({ queryKey: ['recentSessions', currentUserId] });
     } catch (e: any) {
       console.error(e);
       setTranslating(false);
-      Alert.alert('Translation Error', e.message || 'Failed to connect to the translation engine. Please try again.');
+      Alert.alert(
+        'Translation Error',
+        e.message || 'Failed to connect to the translation engine. Please try again.'
+      );
     }
   };
 
@@ -164,7 +202,7 @@ export default function TextTranslationScreen() {
   const handleTtsPlayback = async () => {
     if (!translationResult?.translated) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    
+
     if (playingTts) {
       player.pause();
       setPlayingTts(false);
@@ -206,7 +244,6 @@ export default function TextTranslationScreen() {
 
     try {
       if (isBookmarked) {
-        // Delete bookmark
         const { error } = await supabase
           .from('bookmarks')
           .delete()
@@ -215,19 +252,16 @@ export default function TextTranslationScreen() {
         if (error) throw error;
         setIsBookmarked(false);
       } else {
-        // Create bookmark
-        const { error } = await supabase
-          .from('bookmarks')
-          .insert({
-            user_id: user.id,
-            translation_item_id: (translationResult as any).id,
-            source_text: sourceText,
-            translated_text: (translationResult as any).translated,
-            source_language: nativeCode,
-            target_language: targetCode,
-            tags: ['text'],
-            note: (translationResult as any).notes,
-          } as any);
+        const { error } = await supabase.from('bookmarks').insert({
+          user_id: user.id,
+          translation_item_id: (translationResult as any).id,
+          source_text: sourceText,
+          translated_text: (translationResult as any).translated,
+          source_language: nativeCode,
+          target_language: targetCode,
+          tags: ['text'],
+          note: (translationResult as any).notes,
+        } as any);
         if (error) throw error;
         setIsBookmarked(true);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -271,12 +305,11 @@ export default function TextTranslationScreen() {
             try {
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
               await deleteActivityMutation.mutateAsync(itemId);
-              Alert.alert('Success', 'History item deleted.');
             } catch (err: any) {
               Alert.alert('Deletion Error', err.message || 'Failed to delete history item.');
             }
-          }
-        }
+          },
+        },
       ]
     );
   };
@@ -290,147 +323,189 @@ export default function TextTranslationScreen() {
     }
   };
 
+  const handlePaste = async () => {
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      const text = await Clipboard.getString();
+      if (text) {
+        handleSourceTextChange(text);
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+  };
+
+  const handleCopy = () => {
+    if (!translationResult?.translated) return;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    Clipboard.setString(translationResult.translated);
+    Alert.alert('Copied', 'Translation copied to clipboard.');
+  };
+
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar style="dark" />
-      <KeyboardAvoidingView 
+      <StatusBar style={isDark ? 'light' : 'dark'} />
+      <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
-        {/* Header */}
+        {/* Top Header */}
         <View style={styles.header}>
           <Pressable style={styles.backButton} onPress={() => router.back()}>
             <Ionicons name="arrow-back" size={24} color={colors.textPrimary} />
           </Pressable>
+
           <View style={styles.langPair}>
             <Pressable onPress={() => setLanguagePicker('source')} style={styles.languageButton}>
               <Text style={styles.langText}>{getLanguageByCode(nativeCode)?.name}</Text>
               <Ionicons name="chevron-down" size={14} color={colors.textMuted} />
             </Pressable>
-            <Ionicons name="arrow-forward" size={16} color={colors.textMuted} style={{ marginHorizontal: 8 }} />
+
+            <Pressable onPress={swapLanguages} style={styles.swapButton}>
+              <Ionicons name="swap-horizontal" size={18} color={colors.accentPurple} />
+            </Pressable>
+
             <Pressable onPress={() => setLanguagePicker('target')} style={styles.languageButton}>
               <Text style={styles.langText}>{getLanguageByCode(targetCode)?.name}</Text>
               <Ionicons name="chevron-down" size={14} color={colors.textMuted} />
             </Pressable>
           </View>
-          <View style={{ width: 24 }} />
+
+          <View style={{ width: 28 }} />
         </View>
 
         <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
-          {/* Input Card */}
-          <View style={styles.card}>
+          {/* Text Input Card */}
+          <View style={styles.inputCard}>
             <TextInput
               style={styles.textArea}
-              placeholder="Type your phrase here..."
+              placeholder="Type or paste text to translate..."
               placeholderTextColor={colors.textSubtle}
               multiline
               maxLength={CHAR_LIMIT}
               value={sourceText}
               onChangeText={handleSourceTextChange}
             />
+
             <View style={styles.cardFooter}>
-              <Text style={styles.charCount}>{sourceText.length} / {CHAR_LIMIT}</Text>
-              {sourceText.length > 0 && (
-                <Pressable style={styles.clearButton} onPress={() => handleSourceTextChange('')}>
-                  <Ionicons name="close-circle" size={18} color={colors.textMuted} />
-                </Pressable>
-              )}
+              <Text style={styles.charCount}>
+                {sourceText.length} / {CHAR_LIMIT}
+              </Text>
+              <View style={styles.footerActions}>
+                {sourceText.length > 0 ? (
+                  <Pressable style={styles.cardActionBtn} onPress={() => handleSourceTextChange('')}>
+                    <Ionicons name="close" size={20} color={colors.textSecondary} />
+                  </Pressable>
+                ) : (
+                  <Pressable style={styles.cardActionBtn} onPress={handlePaste}>
+                    <Ionicons name="clipboard-outline" size={18} color={colors.textSecondary} />
+                    <Text style={styles.cardActionText}>Paste</Text>
+                  </Pressable>
+                )}
+              </View>
             </View>
           </View>
 
-          {/* Action Trigger */}
-          <TactileButton
-            title="Translate"
+          {/* Premium Black Action Button */}
+          <Pressable
             onPress={handleTranslate}
-            loading={translating}
             disabled={!sourceText.trim() || translating}
-            style={styles.buttonSpacing}
-          />
+            style={({ pressed }) => [
+              styles.translateBtn,
+              !sourceText.trim() && styles.translateBtnDisabled,
+              pressed && styles.translateBtnPressed,
+            ]}
+          >
+            {translating ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <Text style={styles.translateBtnText}>Translate</Text>
+            )}
+          </Pressable>
 
-          {/* Results Area */}
+          {/* Result Card */}
           {translationResult && (
-            <View style={styles.resultsContainer}>
-              <Text style={styles.sectionHeader}>Translation</Text>
-              
-              <View style={styles.resultCard}>
-                <View style={styles.resultHeader}>
-                  <Text style={styles.resultLang}>{getLanguageByCode(targetCode)?.name}</Text>
-                  <View style={styles.actionsRow}>
-                    <Pressable style={styles.actionIcon} onPress={handleBookmarkToggle}>
-                      <Ionicons 
-                        name={isBookmarked ? 'bookmark' : 'bookmark-outline'} 
-                        size={20} 
-                        color={isBookmarked ? colors.accentPurple : colors.textMuted} 
-                      />
-                    </Pressable>
-                    <Pressable style={styles.actionIcon} onPress={handleTtsPlayback}>
-                      <Ionicons 
-                        name={playingTts ? "volume-high" : "volume-medium"} 
-                        size={20} 
-                        color={playingTts ? colors.accentPurple : colors.textMuted} 
-                      />
-                    </Pressable>
-                  </View>
+            <View style={styles.resultCard}>
+              <View style={styles.resultHeader}>
+                <Text style={styles.resultLangLabel}>
+                  {getLanguageByCode(targetCode)?.name.toUpperCase()}
+                </Text>
+                <View style={styles.resultActions}>
+                  <Pressable style={styles.actionIcon} onPress={handleBookmarkToggle}>
+                    <Ionicons
+                      name={isBookmarked ? 'bookmark' : 'bookmark-outline'}
+                      size={20}
+                      color={isBookmarked ? colors.accentPurple : colors.textSecondary}
+                    />
+                  </Pressable>
+                  <Pressable style={styles.actionIcon} onPress={handleTtsPlayback}>
+                    <Ionicons
+                      name={playingTts ? 'volume-mute-outline' : 'volume-medium-outline'}
+                      size={20}
+                      color={colors.textSecondary}
+                    />
+                  </Pressable>
+                  <Pressable style={styles.actionIcon} onPress={handleCopy}>
+                    <Ionicons name="copy-outline" size={20} color={colors.textSecondary} />
+                  </Pressable>
                 </View>
-                <Text style={styles.resultText}>{translationResult.translated}</Text>
-                
-                {/* Transliteration Link */}
-                <Pressable 
-                  style={styles.translitLink} 
+              </View>
+
+              <Text style={styles.resultText}>{translationResult.translated}</Text>
+
+              {translationResult.transliteration.length > 0 && (
+                <Pressable
+                  style={styles.translitLink}
                   onPress={() => {
                     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                     setShowTransliterationSheet(true);
                   }}
                 >
-                  <Ionicons name="volume-medium-outline" size={16} color={colors.accentPurple} style={{ marginRight: 4 }} />
-                  <Text style={styles.translitLinkText}>Show phonetic pronunciation</Text>
+                  <Ionicons name="eye-outline" size={15} color={colors.accentPurple} />
+                  <Text style={styles.translitLinkText}>Phonetic pronunciation</Text>
                 </Pressable>
-              </View>
-
-              {/* Context Notes Card */}
-              {translationResult.notes && (
-                <View style={styles.notesCard}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-                    <Ionicons name="bulb-outline" size={16} color={colors.accentOrange} style={{ marginRight: 6 }} />
-                    <Text style={styles.notesTitle}>Context Guidance</Text>
-                  </View>
-                  <Text style={styles.notesContent}>{translationResult.notes}</Text>
-                </View>
               )}
 
-              {/* Alternatives List */}
-              {translationResult.alternatives && translationResult.alternatives.length > 0 && (
-                <View style={styles.alternativesContainer}>
-                  <Text style={styles.sectionHeader}>Alternatives</Text>
-                  {translationResult.alternatives.map((alt, idx) => (
-                    <View key={idx} style={styles.altCard}>
-                      <Text style={styles.altText}>{alt}</Text>
-                    </View>
-                  ))}
+              {translationResult.notes.length > 0 && (
+                <View style={styles.guidanceCard}>
+                  <View style={styles.guidanceTitleRow}>
+                    <Ionicons name="information-circle-outline" size={16} color={colors.warning} />
+                    <Text style={styles.guidanceTitle}>Context Notes</Text>
+                  </View>
+                  <Text style={styles.guidanceBody}>{translationResult.notes}</Text>
                 </View>
               )}
             </View>
           )}
 
-          {/* Unified Tool History */}
-          <View style={styles.historyContainer}>
-            <Text style={styles.sectionHeader}>Recent History</Text>
+          {/* History Lists */}
+          <View style={styles.historySection}>
+            <Text style={styles.historyHeading}>Recent Translations</Text>
             {loadingHistory ? (
-              <ActivityIndicator color={colors.primary} style={{ marginVertical: 20 }} />
-            ) : history && history.length > 0 ? (
+              <ActivityIndicator color={colors.primary} style={{ marginVertical: 16 }} />
+            ) : history.length > 0 ? (
               history.map((item) => (
                 <View key={item.id} style={styles.historyCard}>
-                  <Pressable style={styles.historyCardBody} onPress={() => handleSelectHistoryItem(item)}>
+                  <Pressable style={styles.historyCardContent} onPress={() => handleSelectHistoryItem(item)}>
                     <View style={styles.historyCardHeader}>
-                      <Text style={styles.historyCardMeta}>
+                      <Text style={styles.historyCardLangPair}>
                         {item.source_language?.toUpperCase()} → {item.target_language?.toUpperCase()}
                       </Text>
-                      <Text style={styles.historyCardTime}>
-                        {item.created_at ? new Date(item.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''}
+                      <Text style={styles.historyCardDate}>
+                        {item.created_at
+                          ? new Date(item.created_at).toLocaleDateString(undefined, {
+                              month: 'short',
+                              day: 'numeric',
+                            })
+                          : ''}
                       </Text>
                     </View>
-                    <Text style={styles.historySourceText} numberOfLines={2}>{item.source_text}</Text>
-                    <Text style={styles.historyTranslatedText} numberOfLines={2}>{item.translated_text}</Text>
+                    <Text style={styles.historySource} numberOfLines={1}>
+                      {item.source_text}
+                    </Text>
+                    <Text style={styles.historyTranslation} numberOfLines={1}>
+                      {item.translated_text}
+                    </Text>
                   </Pressable>
                   <View style={styles.historyCardActions}>
                     <Pressable style={styles.historyActionBtn} onPress={() => handleExportHistoryItem(item)}>
@@ -443,13 +518,16 @@ export default function TextTranslationScreen() {
                 </View>
               ))
             ) : (
-              <Text style={styles.emptyHistoryText}>No activity yet. Complete a translation to see it here.</Text>
+              <View style={styles.emptyHistory}>
+                <Ionicons name="book-outline" size={32} color={colors.textSubtle} />
+                <Text style={styles.emptyHistoryText}>Your translation log is empty.</Text>
+              </View>
             )}
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
 
-      {/* Phonetic Pronunciation Bottom Sheet */}
+      {/* Transliteration sheet */}
       {showTransliterationSheet && (
         <View style={styles.bottomSheetOverlay}>
           <Pressable style={styles.dismissOverlay} onPress={() => setShowTransliterationSheet(false)} />
@@ -464,13 +542,14 @@ export default function TextTranslationScreen() {
               <Text style={styles.phoneticLabel}>PHONETIC ALIGNMENT</Text>
               <Text style={styles.phoneticText}>{translationResult?.transliteration}</Text>
               <Text style={styles.phoneticDesc}>
-                Capitalized letters indicate where the stress / emphasis should be placed.
+                Capitalized letters indicate where emphasis is placed.
               </Text>
             </View>
           </View>
         </View>
       )}
 
+      {/* Language search sheets */}
       <Modal
         visible={languagePicker !== null}
         transparent
@@ -482,9 +561,8 @@ export default function TextTranslationScreen() {
             <View style={styles.sheetHeader}>
               <View>
                 <Text style={styles.sheetTitle}>
-                  {languagePicker === 'source' ? 'Choose source language' : 'Choose target language'}
+                  {languagePicker === 'source' ? 'Source Language' : 'Target Language'}
                 </Text>
-                <Text style={styles.languageCount}>{languages.length} supported languages</Text>
               </View>
               <Pressable onPress={() => setLanguagePicker(null)}>
                 <Ionicons name="close" size={22} color={colors.textPrimary} />
@@ -493,14 +571,16 @@ export default function TextTranslationScreen() {
             <TextInput
               value={languageSearch}
               onChangeText={setLanguageSearch}
-              placeholder="Search language or code"
+              placeholder="Search by name or code..."
               placeholderTextColor={colors.textSubtle}
               style={styles.languageSearch}
               autoCapitalize="none"
+              autoCorrect={false}
             />
             <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               {filteredLanguages.map((language) => {
-                const selected = (languagePicker === 'source' ? nativeCode : targetCode) === language.code;
+                const selected =
+                  (languagePicker === 'source' ? nativeCode : targetCode) === language.code;
                 return (
                   <Pressable
                     key={language.code}
@@ -509,7 +589,9 @@ export default function TextTranslationScreen() {
                   >
                     <View style={{ flex: 1 }}>
                       <Text style={styles.languageName}>{language.name}</Text>
-                      <Text style={styles.languageNative}>{language.nativeName} · {language.code}</Text>
+                      <Text style={styles.languageNative}>
+                        {language.nativeName} · {language.code.toUpperCase()}
+                      </Text>
                     </View>
                     {selected && <Ionicons name="checkmark-circle" size={20} color={colors.accentPurple} />}
                   </Pressable>
@@ -532,98 +614,112 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 14,
+    paddingHorizontal: 16,
+    height: 56,
     borderBottomWidth: 1,
-    borderColor: colors.border,
+    borderBottomColor: colors.border,
   },
   backButton: {
-    padding: 4,
+    padding: 6,
   },
   langPair: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 8,
   },
   languageButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    backgroundColor: colors.backgroundSoft,
     paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    gap: 4,
   },
   langText: {
-    fontSize: 16,
-    fontFamily: typography.bodySemibold.fontFamily,
+    fontSize: 13,
     fontWeight: '700',
     color: colors.textPrimary,
   },
-  scrollContent: {
-    padding: 20,
+  swapButton: {
+    padding: 6,
   },
-  card: {
-    backgroundColor: colors.surfaceSoft,
+  scrollContent: {
+    padding: 16,
+  },
+  inputCard: {
+    backgroundColor: colors.backgroundSoft,
     borderRadius: 16,
     borderWidth: 1,
     borderColor: colors.border,
     padding: 16,
-    minHeight: 160,
+    minHeight: 140,
     justifyContent: 'space-between',
   },
   textArea: {
     fontSize: 16,
-    fontFamily: typography.body.fontFamily,
     color: colors.textPrimary,
-    minHeight: 100,
+    minHeight: 80,
     textAlignVertical: 'top',
   },
   cardFooter: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    marginTop: 12,
   },
   charCount: {
-    fontSize: 12,
-    fontFamily: typography.tabular.fontFamily,
+    fontSize: 11,
     color: colors.textSubtle,
   },
-  clearButton: {
-    padding: 4,
+  footerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
-  translateButton: {
-    backgroundColor: colors.primary,
-    borderRadius: 16,
-    paddingVertical: 16,
+  cardActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    gap: 4,
+  },
+  cardActionText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  translateBtn: {
+    backgroundColor: '#000000',
+    borderRadius: 12,
+    paddingVertical: 14,
     alignItems: 'center',
     justifyContent: 'center',
     marginVertical: 16,
   },
-  translateButtonDisabled: {
-    backgroundColor: colors.disabled,
+  translateBtnDisabled: {
+    opacity: 0.45,
   },
-  translateButtonText: {
-    fontSize: 16,
-    fontFamily: typography.button.fontFamily,
-    fontWeight: typography.button.fontWeight,
-    color: colors.textInverse,
+  translateBtnPressed: {
+    opacity: 0.85,
   },
-  resultsContainer: {
-    marginTop: 10,
-  },
-  sectionHeader: {
-    fontSize: 14,
-    fontFamily: typography.captionMedium.fontFamily,
+  translateBtnText: {
+    fontSize: 15,
     fontWeight: '700',
-    color: colors.textMuted,
-    textTransform: 'uppercase',
-    letterSpacing: 1.5,
-    marginBottom: 10,
+    color: '#FFFFFF',
   },
   resultCard: {
-    backgroundColor: colors.surfaceSoft,
+    backgroundColor: colors.backgroundSoft,
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: 16,
     padding: 16,
-    marginBottom: 16,
+    marginBottom: 24,
   },
   resultHeader: {
     flexDirection: 'row',
@@ -631,13 +727,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 12,
   },
-  resultLang: {
-    fontSize: 12,
-    fontFamily: typography.captionMedium.fontFamily,
-    fontWeight: '700',
+  resultLangLabel: {
+    fontSize: 11,
+    fontWeight: '800',
     color: colors.textMuted,
+    letterSpacing: 0.5,
   },
-  actionsRow: {
+  resultActions: {
     flexDirection: 'row',
     gap: 12,
   },
@@ -646,7 +742,7 @@ const styles = StyleSheet.create({
   },
   resultText: {
     fontSize: 18,
-    fontFamily: typography.bodyMedium.fontFamily,
+    fontWeight: '700',
     color: colors.textPrimary,
     lineHeight: 24,
     marginBottom: 12,
@@ -654,48 +750,106 @@ const styles = StyleSheet.create({
   translitLink: {
     flexDirection: 'row',
     alignItems: 'center',
-    alignSelf: 'flex-start',
-    paddingVertical: 4,
+    gap: 4,
+    marginBottom: 12,
   },
   translitLinkText: {
     fontSize: 13,
-    fontFamily: typography.bodyMedium.fontFamily,
     color: colors.accentPurple,
+    fontWeight: '600',
   },
-  notesCard: {
+  guidanceCard: {
     backgroundColor: colors.surfaceWarning,
     borderWidth: 1,
-    borderColor: '#F9E5C9',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 20,
+    borderColor: 'rgba(226, 160, 92, 0.25)',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 8,
   },
-  notesTitle: {
-    fontSize: 13,
-    fontFamily: typography.bodySemibold.fontFamily,
+  guidanceTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
+  },
+  guidanceTitle: {
+    fontSize: 12,
+    fontWeight: '700',
     color: colors.warning,
   },
-  notesContent: {
-    fontSize: 13,
-    fontFamily: typography.body.fontFamily,
+  guidanceBody: {
+    fontSize: 12,
     color: colors.textSecondary,
     lineHeight: 18,
   },
-  alternativesContainer: {
-    marginBottom: 20,
+  historySection: {
+    marginTop: 8,
   },
-  altCard: {
-    backgroundColor: colors.surfaceSoft,
+  historyHeading: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 12,
+  },
+  historyCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.backgroundSoft,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 8,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 10,
   },
-  altText: {
+  historyCardContent: {
+    flex: 1,
+    marginRight: 12,
+  },
+  historyCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  historyCardLangPair: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.textMuted,
+  },
+  historyCardDate: {
+    fontSize: 10,
+    color: colors.textSubtle,
+  },
+  historySource: {
     fontSize: 14,
-    fontFamily: typography.body.fontFamily,
+    fontWeight: '600',
     color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  historyTranslation: {
+    fontSize: 14,
+    color: colors.accentPurple,
+  },
+  historyCardActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  historyActionBtn: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  emptyHistory: {
+    padding: 32,
+    alignItems: 'center',
+    gap: 8,
+  },
+  emptyHistoryText: {
+    fontSize: 13,
+    color: colors.textSubtle,
   },
   bottomSheetOverlay: {
     ...StyleSheet.absoluteFill,
@@ -710,7 +864,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    padding: 24,
+    padding: 20,
     paddingBottom: 40,
   },
   sheetHeader: {
@@ -720,8 +874,7 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   sheetTitle: {
-    fontSize: 17,
-    fontFamily: typography.heading4.fontFamily,
+    fontSize: 16,
     fontWeight: '700',
     color: colors.textPrimary,
   },
@@ -730,26 +883,19 @@ const styles = StyleSheet.create({
   },
   phoneticLabel: {
     fontSize: 11,
-    fontFamily: typography.captionMedium.fontFamily,
     fontWeight: '700',
     color: colors.textMuted,
-    letterSpacing: 1.5,
+    letterSpacing: 0.5,
   },
   phoneticText: {
     fontSize: 22,
-    fontFamily: typography.heading2.fontFamily,
-    fontWeight: '700',
+    fontWeight: '800',
     color: colors.accentPurple,
   },
   phoneticDesc: {
     fontSize: 13,
-    fontFamily: typography.body.fontFamily,
     color: colors.textSecondary,
     lineHeight: 18,
-    marginTop: 4,
-  },
-  buttonSpacing: {
-    marginTop: 16,
   },
   languageOverlay: {
     flex: 1,
@@ -757,113 +903,43 @@ const styles = StyleSheet.create({
     backgroundColor: colors.overlay,
   },
   languageSheet: {
-    maxHeight: '78%',
+    maxHeight: '75%',
     backgroundColor: colors.background,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     padding: 20,
     paddingBottom: 36,
   },
-  languageCount: {
-    marginTop: 3,
-    fontSize: 12,
-    color: colors.textMuted,
-    fontFamily: typography.captionMedium.fontFamily,
-  },
   languageSearch: {
-    backgroundColor: colors.surfaceSoft,
+    backgroundColor: colors.backgroundSoft,
     borderColor: colors.border,
     borderWidth: 1,
     borderRadius: 12,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 10,
     color: colors.textPrimary,
     marginBottom: 12,
+    fontSize: 14,
   },
   languageRow: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 12,
-    paddingVertical: 11,
+    paddingVertical: 12,
     borderRadius: 12,
     marginBottom: 4,
   },
   languageRowSelected: {
-    backgroundColor: colors.surfaceSoft,
+    backgroundColor: colors.overlayLight || 'rgba(9, 9, 9, 0.08)',
   },
   languageName: {
     fontSize: 15,
-    fontFamily: typography.bodySemibold.fontFamily,
+    fontWeight: '600',
     color: colors.textPrimary,
   },
   languageNative: {
     marginTop: 2,
     fontSize: 12,
-    fontFamily: typography.captionMedium.fontFamily,
     color: colors.textMuted,
-  },
-  historyContainer: {
-    marginTop: 30,
-    marginBottom: 20,
-  },
-  historyCard: {
-    backgroundColor: colors.surfaceSoft,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 16,
-    marginBottom: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  historyCardBody: {
-    flex: 1,
-    marginRight: 12,
-  },
-  historyCardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 6,
-  },
-  historyCardMeta: {
-    fontSize: 11,
-    fontFamily: typography.captionMedium.fontFamily,
-    fontWeight: '700',
-    color: colors.textMuted,
-  },
-  historyCardTime: {
-    fontSize: 11,
-    fontFamily: typography.captionMedium.fontFamily,
-    color: colors.textSubtle,
-  },
-  historySourceText: {
-    fontSize: 14,
-    fontFamily: typography.bodyMedium.fontFamily,
-    color: colors.textPrimary,
-    marginBottom: 2,
-  },
-  historyTranslatedText: {
-    fontSize: 14,
-    fontFamily: typography.body.fontFamily,
-    color: colors.accentPurple,
-  },
-  historyCardActions: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  historyActionBtn: {
-    padding: 6,
-    borderRadius: 8,
-    backgroundColor: colors.background,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  emptyHistoryText: {
-    fontSize: 14,
-    fontFamily: typography.body.fontFamily,
-    color: colors.textSubtle,
-    textAlign: 'center',
-    marginTop: 10,
   },
 });
