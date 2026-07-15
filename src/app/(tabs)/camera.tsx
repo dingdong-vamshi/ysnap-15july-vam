@@ -369,6 +369,26 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
     }
   };
 
+  // Reactively start/stop camera on focus changes
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    if (isFocused && !capturedImage) {
+      startWebCamera();
+    } else {
+      stopWebCamera();
+    }
+  }, [isFocused, capturedImage]);
+
+  // Bind webStream to video element once mounted
+  useEffect(() => {
+    if (Platform.OS === 'web' && videoRef.current && webStream) {
+      if (videoRef.current.srcObject !== webStream) {
+        videoRef.current.srcObject = webStream;
+        videoRef.current.play().catch((e: any) => console.log('Video play error:', e));
+      }
+    }
+  }, [webStream, videoRef.current]);
+
   // Handle Tab Focus Lifecycle
   useFocusEffect(
     React.useCallback(() => {
@@ -980,6 +1000,7 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   playsInline
                   muted
+                  autoPlay
                 />
                 
                 {/* Corner Google Lens brackets overlay */}
