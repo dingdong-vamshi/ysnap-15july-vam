@@ -17,6 +17,7 @@ import { historyService } from '../services/historyService';
 type SessionTypeFilter = 'all' | 'type' | 'voice' | 'camera' | 'conversation' | 'accent_changer' | 'voice_clone';
 
 function AudioPlayButton({ audioUrl }: { audioUrl: string }) {
+  const styles = useThemeStyles(createStyles);
   const [isPlaying, setIsPlaying] = useState(false);
   const player = useAudioPlayer(audioUrl);
 

@@ -749,7 +749,8 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
       category: item.operation_type === 'food' ? 'food' : 'text',
       title: item.title || 'History Scan',
       summary: item.translated_text || item.source_text || '',
-      suggestedActions: ['translate', 'ask_follow_up']
+      suggestedActions: ['translate', 'ask_follow_up'],
+      spokenSummary: item.translated_text || item.source_text || '',
     };
 
     if (item.operation_type === 'food') {
@@ -1227,7 +1228,7 @@ Target Language: ${selectedTargetLanguage || targetLanguage}`;
             <Text style={{ fontSize: 9, color: colors.textPrimary, marginTop: 2 }}>Cancel</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.analyseLaunchBtn} onPress={handleStartAnalysis}>
+          <TouchableOpacity style={styles.analyseLaunchBtn} onPress={() => handleStartAnalysis()}>
             <Ionicons name="sparkles-outline" size={24} color={colors.textInverse} />
             <Text style={{ fontSize: 13, fontWeight: '700', color: colors.textInverse, marginLeft: 8 }}>Analyse Scan</Text>
           </TouchableOpacity>

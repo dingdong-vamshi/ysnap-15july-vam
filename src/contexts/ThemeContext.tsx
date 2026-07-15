@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useColorScheme, Platform } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { useAuth } from './AuthContext';
-import { setThemeMode } from '../constants/colors';
+import { setThemeMode, colors } from '../constants/colors';
 
 type ThemeType = 'light' | 'dark' | 'system';
 
