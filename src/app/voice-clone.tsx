@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   Alert,
   TextInput,
+  Platform,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
@@ -30,6 +31,28 @@ import { useAuth } from '../contexts/AuthContext';
 import { elevenLabsService } from '../services/elevenLabs';
 import { TactileButton } from '../components';
 
+const VoiceCloneNativeAudio: React.FC<{
+  playingHistoryId: string | null;
+  setPlayingHistoryId: (id: string | null) => void;
+  playerRef: React.MutableRefObject<any>;
+}> = ({ playingHistoryId, setPlayingHistoryId, playerRef }) => {
+  const player = useAudioPlayer('');
+
+  React.useEffect(() => {
+    playerRef.current = player;
+  }, [player]);
+
+  React.useEffect(() => {
+    if (playingHistoryId && player) {
+      if (!player.playing && player.currentTime >= player.duration - 0.2) {
+        setPlayingHistoryId(null);
+      }
+    }
+  }, [player.playing, player.currentTime, playingHistoryId]);
+
+  return null;
+};
+
 export default function VoiceCloneScreen() {
   const router = useRouter();
   const { user } = useAuth();
@@ -37,7 +60,8 @@ export default function VoiceCloneScreen() {
 
   const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
-  const historyAudioPlayer = useAudioPlayer('');
+  const playerRef = useRef<any>(null);
+  const webAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const createActivityMutation = useCreateActivity();
   const deleteActivityMutation = useDeleteActivity();
@@ -312,7 +336,11 @@ export default function VoiceCloneScreen() {
   const handlePlayHistoryAudio = async (item: any) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (playingHistoryId === item.id) {
-      historyAudioPlayer.pause();
+      if (Platform.OS === 'web') {
+        if (webAudioRef.current) webAudioRef.current.pause();
+      } else if (playerRef.current) {
+        playerRef.current.pause();
+      }
       setPlayingHistoryId(null);
       return;
     }
@@ -324,20 +352,21 @@ export default function VoiceCloneScreen() {
       const url = await historyService.getSignedUrl(item.input_asset_path);
       if (url) {
         setPlayingHistoryId(item.id);
-        historyAudioPlayer.replace({ uri: url });
-        historyAudioPlayer.play();
+        if (Platform.OS === 'web') {
+          if (webAudioRef.current) webAudioRef.current.pause();
+          webAudioRef.current = new Audio(url);
+          webAudioRef.current.onended = () => setPlayingHistoryId(null);
+          webAudioRef.current.play().catch((e) => console.warn(e));
+        } else if (playerRef.current) {
+          playerRef.current.replace({ uri: url });
+          playerRef.current.play();
+        }
       }
     } catch (err: any) {
       console.error(err);
       Alert.alert('Playback Error', 'Failed to play sample audio.');
     }
   };
-
-  useEffect(() => {
-    if (playingHistoryId && !historyAudioPlayer.playing && historyAudioPlayer.currentTime >= historyAudioPlayer.duration - 0.2) {
-      setPlayingHistoryId(null);
-    }
-  }, [historyAudioPlayer.playing, historyAudioPlayer.currentTime]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -613,6 +642,13 @@ export default function VoiceCloneScreen() {
           )}
         </View>
       </ScrollView>
+      {Platform.OS !== 'web' && (
+        <VoiceCloneNativeAudio
+          playingHistoryId={playingHistoryId}
+          setPlayingHistoryId={setPlayingHistoryId}
+          playerRef={playerRef}
+        />
+      )}
     </SafeAreaView>
   );
 }

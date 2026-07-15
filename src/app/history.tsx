@@ -1,24 +1,74 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, Pressable, ScrollView, TextInput, ActivityIndicator, Modal, SafeAreaView, Image } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  StyleSheet,
+  Text,
+  View,
+  Pressable,
+  ScrollView,
+  TextInput,
+  ActivityIndicator,
+  Modal,
+  SafeAreaView,
+  Image,
+  Alert,
+  Clipboard,
+  Platform,
+} from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
-import { useQuery } from '@tanstack/react-query';
-import { useAuth } from '../contexts/AuthContext';
-import { supabase } from '../lib/supabase';
-import { colors } from '../constants/colors';
-import { useTheme, useThemeStyles } from '../contexts/ThemeContext';
-import { typography } from '../constants/typography';
-import { getLanguageByCode } from '../constants/languages';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { useAudioPlayer } from 'expo-audio';
+
+import { colors } from '../constants/colors';
+import { spacing, layout, shadows } from '../constants/spacing';
+import { typography } from '../constants/typography';
+import { getLanguageByCode } from '../constants/languages';
+import { supabase } from '../lib/supabase';
+import { useAuth } from '../contexts/AuthContext';
 import { historyService } from '../services/historyService';
+import { useTheme, useThemeStyles } from '../contexts/ThemeContext';
 
 type SessionTypeFilter = 'all' | 'type' | 'voice' | 'camera' | 'conversation' | 'accent_changer' | 'voice_clone';
 
-function AudioPlayButton({ audioUrl }: { audioUrl: string }) {
-  const styles = useThemeStyles(createStyles);
-  const [isPlaying, setIsPlaying] = useState(false);
+// Web-safe Audio Player Button
+function WebAudioPlayerButton({ audioUrl, isPlaying, setIsPlaying, styles }: any) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const togglePlay = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (!audioRef.current) {
+      audioRef.current = new Audio(audioUrl);
+      audioRef.current.onended = () => setIsPlaying(false);
+    }
+
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      audioRef.current.play().catch((e) => console.warn('[Web Audio] failed:', e));
+      setIsPlaying(true);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+    };
+  }, []);
+
+  return (
+    <Pressable onPress={togglePlay} style={styles.audioPlayBtn}>
+      <Ionicons name={isPlaying ? 'pause' : 'play'} size={14} color="#FFFFFF" />
+    </Pressable>
+  );
+}
+
+// Native-safe Audio Player Button
+function NativeAudioPlayerButton({ audioUrl, isPlaying, setIsPlaying, styles }: any) {
   const player = useAudioPlayer(audioUrl);
 
   useEffect(() => {
@@ -41,8 +91,33 @@ function AudioPlayButton({ audioUrl }: { audioUrl: string }) {
 
   return (
     <Pressable onPress={togglePlay} style={styles.audioPlayBtn}>
-      <Ionicons name={isPlaying ? 'pause' : 'play'} size={12} color={colors.primary} />
+      <Ionicons name={isPlaying ? 'pause' : 'play'} size={14} color="#FFFFFF" />
     </Pressable>
+  );
+}
+
+function AudioPlayButton({ audioUrl }: { audioUrl: string }) {
+  const styles = useThemeStyles(createStyles);
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  return (
+    <>
+      {Platform.OS === 'web' ? (
+        <WebAudioPlayerButton
+          audioUrl={audioUrl}
+          isPlaying={isPlaying}
+          setIsPlaying={setIsPlaying}
+          styles={styles}
+        />
+      ) : (
+        <NativeAudioPlayerButton
+          audioUrl={audioUrl}
+          isPlaying={isPlaying}
+          setIsPlaying={setIsPlaying}
+          styles={styles}
+        />
+      )}
+    </>
   );
 }
 
@@ -51,6 +126,7 @@ export default function HistoryScreen() {
   const { user } = useAuth();
   const { isDark } = useTheme();
   const styles = useThemeStyles(createStyles);
+  const queryClient = useQueryClient();
   const params = useLocalSearchParams<{ sessionId?: string }>();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -63,7 +139,7 @@ export default function HistoryScreen() {
   const [signedInputUrl, setSignedInputUrl] = useState<string | null>(null);
   const [signedOutputUrl, setSignedOutputUrl] = useState<string | null>(null);
 
-  // 1. Fetch unified activity_history
+  // Fetch unified activity_history
   const { data: sessions = [], isLoading, refetch } = useQuery<any[]>({
     queryKey: ['activityHistory', user?.id],
     queryFn: async () => {
@@ -78,6 +154,51 @@ export default function HistoryScreen() {
     },
     enabled: !!user?.id,
   });
+
+  // Delete Mutation
+  const deleteMutation = useMutation({
+    mutationFn: async (id: string) => {
+      return historyService.deleteActivity(id);
+    },
+    onSuccess: () => {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      queryClient.invalidateQueries({ queryKey: ['activityHistory', user?.id] });
+      queryClient.invalidateQueries({ queryKey: ['practiceAnalytics', user?.id] });
+      setSelectedSession(null);
+    },
+    onError: (err: any) => {
+      Alert.alert('Delete Failed', err.message || 'Could not delete history item.');
+    },
+  });
+
+  const handleDeleteItem = (id: string) => {
+    Alert.alert('Delete Record', 'Are you sure you want to permanently delete this history record?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => {
+          deleteMutation.mutate(id);
+        },
+      },
+    ]);
+  };
+
+  const handleExportItem = async (session: any) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    try {
+      await historyService.exportActivity(session, 'text');
+      Alert.alert('Exported', 'The text file has been downloaded.');
+    } catch (e: any) {
+      Alert.alert('Export Failed', e.message || 'Failed to export.');
+    }
+  };
+
+  const handleCopyText = (text: string) => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    Clipboard.setString(text);
+    Alert.alert('Copied', 'Text copied to clipboard.');
+  };
 
   // Resolve signed URLs for selected history item
   useEffect(() => {
@@ -104,15 +225,17 @@ export default function HistoryScreen() {
 
   // Filtering Logic
   const filteredSessions = (sessions ?? []).filter((sess) => {
-    const matchesSearch = sess.title?.toLowerCase().includes(searchQuery.toLowerCase()) || 
+    const matchesSearch =
+      sess.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       sess.source_text?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       sess.translated_text?.toLowerCase().includes(searchQuery.toLowerCase());
-    
+
     const matchesType = activeFilter === 'all' || sess.tool === activeFilter;
-    
-    const matchesLang = !selectedLanguageFilter || 
-      sess.metadata?.sourceLanguage === selectedLanguageFilter || 
-      sess.metadata?.targetLanguage === selectedLanguageFilter;
+
+    const matchesLang =
+      !selectedLanguageFilter ||
+      sess.source_language === selectedLanguageFilter ||
+      sess.target_language === selectedLanguageFilter;
 
     return matchesSearch && matchesType && matchesLang;
   });
@@ -126,27 +249,43 @@ export default function HistoryScreen() {
     setSelectedSession(null);
   };
 
+  // Determine sticky-note colors based on tool type
+  const getNoteStyles = (tool: string) => {
+    switch (tool) {
+      case 'type':
+        return { bg: isDark ? '#2C2518' : '#FFFDF3', border: isDark ? '#DFB65D' : '#F4DFB1', tag: 'Text' };
+      case 'voice':
+        return { bg: isDark ? '#241E34' : '#F9F7FF', border: isDark ? '#7E6CD5' : '#E6E1F9', tag: 'Voice' };
+      case 'camera':
+        return { bg: isDark ? '#14251B' : '#F4FAF6', border: isDark ? '#3D8E5F' : '#D1ECE0', tag: 'Camera' };
+      case 'conversation':
+        return { bg: isDark ? '#2D2018' : '#FFF9F5', border: isDark ? '#C76A28' : '#FADCC6', tag: 'Talk' };
+      default:
+        return { bg: isDark ? '#222B38' : '#F6F9FD', border: isDark ? '#4B77BE' : '#DBE6F5', tag: 'System' };
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style={isDark ? 'light' : 'dark'} />
-      
+
       {/* Header */}
       <View style={styles.header}>
         <Pressable style={styles.backButton} onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={24} color={colors.textPrimary} />
         </Pressable>
-        <Text style={styles.headerTitle}>History Logs</Text>
-        <Pressable 
-          style={styles.filterTrigger} 
+        <Text style={styles.headerTitle}>Translation Memory</Text>
+        <Pressable
+          style={styles.filterTrigger}
           onPress={() => {
             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
             setShowFilterSheet(true);
           }}
         >
-          <Ionicons 
-            name="funnel-outline" 
-            size={20} 
-            color={selectedLanguageFilter ? colors.accentPurple : colors.textPrimary} 
+          <Ionicons
+            name="funnel-outline"
+            size={20}
+            color={selectedLanguageFilter ? colors.accentPurple : colors.textPrimary}
           />
         </Pressable>
       </View>
@@ -170,12 +309,20 @@ export default function HistoryScreen() {
 
       {/* Filter Chips row */}
       <View>
-        <ScrollView 
-          horizontal 
-          showsHorizontalScrollIndicator={false} 
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.chipsContainer}
         >
-          {(['all', 'type', 'voice', 'camera', 'conversation', 'accent_changer', 'voice_clone'] as SessionTypeFilter[]).map((type) => {
+          {([
+            'all',
+            'type',
+            'voice',
+            'camera',
+            'conversation',
+            'accent_changer',
+            'voice_clone',
+          ] as SessionTypeFilter[]).map((type) => {
             const selected = activeFilter === type;
             return (
               <Pressable
@@ -187,7 +334,13 @@ export default function HistoryScreen() {
                 }}
               >
                 <Text style={[styles.chipText, selected && styles.chipTextActive]}>
-                  {type === 'type' ? 'Text' : type === 'accent_changer' ? 'Accent' : type === 'voice_clone' ? 'Clone' : type.charAt(0).toUpperCase() + type.slice(1)}
+                  {type === 'type'
+                    ? 'Text'
+                    : type === 'accent_changer'
+                    ? 'Accent'
+                    : type === 'voice_clone'
+                    ? 'Clone'
+                    : type.charAt(0).toUpperCase() + type.slice(1)}
                 </Text>
               </Pressable>
             );
@@ -198,62 +351,153 @@ export default function HistoryScreen() {
       {/* Main List */}
       {isLoading ? (
         <View style={styles.loaderContainer}>
-          <ActivityIndicator size="large" color={colors.primary} />
+          <ActivityIndicator size="large" color={colors.accentPurple} />
         </View>
       ) : filteredSessions.length > 0 ? (
         <ScrollView contentContainerStyle={styles.listContainer} showsVerticalScrollIndicator={false}>
           {filteredSessions.map((session) => {
-            const toolIcon = session.tool === 'voice' 
-              ? 'mic-outline' 
-              : session.tool === 'camera' 
-              ? 'camera-outline' 
-              : session.tool === 'conversation'
-              ? 'chatbubbles-outline'
-              : session.tool === 'accent_changer'
-              ? 'sparkles-outline'
-              : session.tool === 'voice_clone'
-              ? 'people-outline'
-              : 'document-text-outline';
-
-            const toolLabel = session.tool === 'type' 
-              ? 'TEXT' 
-              : session.tool === 'accent_changer' 
-              ? 'ACCENT' 
-              : session.tool === 'voice_clone' 
-              ? 'CLONE' 
-              : session.tool?.toUpperCase();
+            const noteCfg = getNoteStyles(session.tool);
+            const sourceLangName = getLanguageByCode(session.source_language || 'en')?.name || 'English';
+            const targetLangName = getLanguageByCode(session.target_language || 'es')?.name || 'Spanish';
 
             return (
-              <Pressable 
-                key={session.id} 
-                style={styles.historyCard}
-                onPress={() => handleSelectSession(session)}
-              >
-                <View style={styles.cardTop}>
-                  <View style={styles.badgeRow}>
-                    <View style={styles.typeBadge}>
-                      <Ionicons 
-                        name={toolIcon} 
-                        size={12} 
-                        color={colors.textMuted} 
-                        style={{ marginRight: 4 }} 
-                      />
-                      <Text style={styles.badgeText}>{toolLabel}</Text>
-                    </View>
-                    {session.metadata?.sourceLanguage && session.metadata?.targetLanguage && (
-                      <Text style={styles.langPairLabel}>
-                        {getLanguageByCode(session.metadata.sourceLanguage)?.name} → {getLanguageByCode(session.metadata.targetLanguage)?.name}
+              <View key={session.id} style={styles.layeredMemoContainer}>
+                {/* Visual stacked offset paper layers */}
+                <View style={[styles.memoBgLayer, { backgroundColor: noteCfg.bg, borderColor: noteCfg.border, bottom: -4, right: -4, zIndex: 1 }]} />
+                <View style={[styles.memoBgLayer, { backgroundColor: noteCfg.bg, borderColor: noteCfg.border, bottom: -2, right: -2, zIndex: 2 }]} />
+                
+                <Pressable
+                  style={[styles.memoNoteCard, { backgroundColor: noteCfg.bg, borderColor: noteCfg.border }]}
+                  onPress={() => handleSelectSession(session)}
+                >
+                  {/* Folded corner tag */}
+                  <View style={[styles.memoFoldTag, { borderTopColor: noteCfg.border, borderRightColor: noteCfg.border }]} />
+
+                  {/* Header tags */}
+                  <View style={styles.memoHeader}>
+                    <View style={styles.memoTagBadge}>
+                      <Text style={[styles.memoTagText, { color: isDark ? colors.textPrimary : colors.textSecondary }]}>
+                        {noteCfg.tag.toUpperCase()}
                       </Text>
+                    </View>
+                    <Text style={styles.memoTime}>
+                      {new Date(session.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                    </Text>
+                  </View>
+
+                  {/* Body Contents */}
+                  <View style={styles.memoBody}>
+                    {session.tool === 'type' && (
+                      <View>
+                        <Text style={styles.memoSourceText} numberOfLines={2}>"{session.source_text}"</Text>
+                        <Text style={styles.memoTranslationText} numberOfLines={2}>{session.translated_text}</Text>
+                      </View>
+                    )}
+
+                    {session.tool === 'voice' && (
+                      <View>
+                        <View style={styles.memoVoiceRow}>
+                          <Ionicons name="mic" size={14} color={colors.accentPurple} style={{ marginRight: 6 }} />
+                          <View style={styles.miniWaveform}>
+                            {[8, 16, 12, 18, 10, 14, 6, 12].map((h, i) => (
+                              <View key={i} style={[styles.miniWaveBar, { height: h, backgroundColor: colors.accentPurple }]} />
+                            ))}
+                          </View>
+                        </View>
+                        <Text style={styles.memoSourceText} numberOfLines={2}>"{session.source_text || 'Voice clip transcript'}"</Text>
+                        <Text style={styles.memoTranslationText} numberOfLines={2}>{session.translated_text}</Text>
+                      </View>
+                    )}
+
+                    {session.tool === 'camera' && (
+                      <View style={styles.memoCameraLayout}>
+                        {session.thumbnail_path ? (
+                          <View style={styles.memoThumbnailWrapper}>
+                            <Ionicons name="image-outline" size={24} color={colors.textSubtle} />
+                          </View>
+                        ) : (
+                          <View style={styles.memoIconWrapper}>
+                            <Ionicons name="camera-outline" size={22} color={colors.accentGreen} />
+                          </View>
+                        )}
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.memoCategoryLabel}>
+                            {session.metadata?.category?.toUpperCase() || 'OBJECT SCAN'}
+                          </Text>
+                          <Text style={styles.memoCameraTitle} numberOfLines={1}>{session.title}</Text>
+                          <Text style={styles.memoCameraDesc} numberOfLines={1}>
+                            {session.translated_text || session.source_text}
+                          </Text>
+                        </View>
+                      </View>
+                    )}
+
+                    {session.tool === 'conversation' && (
+                      <View>
+                        <Text style={styles.memoConvoHeader}>Dialogue turns: {session.transcript?.length || 2}</Text>
+                        <View style={styles.memoConvoLine}>
+                          <Text style={styles.memoConvoSpeaker}>EN:</Text>
+                          <Text style={styles.memoConvoQuote} numberOfLines={1}>
+                            {session.transcript?.[0]?.source_text || session.source_text}
+                          </Text>
+                        </View>
+                        <View style={styles.memoConvoLine}>
+                          <Text style={[styles.memoConvoSpeaker, { color: colors.accentPurple }]}>ES:</Text>
+                          <Text style={[styles.memoConvoQuote, { fontWeight: '600' }]} numberOfLines={1}>
+                            {session.transcript?.[0]?.translated_text || session.translated_text}
+                          </Text>
+                        </View>
+                      </View>
+                    )}
+
+                    {session.tool === 'accent_changer' && (
+                      <View>
+                        <Text style={styles.memoAccentLabel}>Accent: {session.metadata?.targetAccent || 'British'}</Text>
+                        <Text style={styles.memoSourceText} numberOfLines={2}>"{session.source_text}"</Text>
+                      </View>
+                    )}
+
+                    {session.tool === 'voice_clone' && (
+                      <View>
+                        <Text style={styles.memoAccentLabel}>Voice Profile: {session.title?.replace('Voice Clone: ', '')}</Text>
+                        <Text style={styles.memoSourceText} numberOfLines={2}>"{session.source_text}"</Text>
+                      </View>
                     )}
                   </View>
-                  <Text style={styles.cardTime}>
-                    {new Date(session.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                  </Text>
-                </View>
-                <Text style={styles.cardTitle} numberOfLines={1}>
-                  {session.title || 'Untitled Activity'}
-                </Text>
-              </Pressable>
+
+                  {/* Footer & Languages */}
+                  <View style={styles.memoFooter}>
+                    <Text style={styles.memoLangBadge}>
+                      {sourceLangName} → {targetLangName}
+                    </Text>
+                    
+                    {/* Inline Quick Action Icons */}
+                    <View style={styles.memoActionRow}>
+                      <Pressable
+                        style={styles.memoIconAction}
+                        onPress={() => handleCopyText(session.translated_text || session.source_text || '')}
+                        accessibilityLabel="Copy text"
+                      >
+                        <Ionicons name="copy-outline" size={14} color={colors.textSecondary} />
+                      </Pressable>
+                      <Pressable
+                        style={styles.memoIconAction}
+                        onPress={() => handleExportItem(session)}
+                        accessibilityLabel="Export TXT"
+                      >
+                        <Ionicons name="download-outline" size={14} color={colors.textSecondary} />
+                      </Pressable>
+                      <Pressable
+                        style={styles.memoIconAction}
+                        onPress={() => handleDeleteItem(session.id)}
+                        accessibilityLabel="Delete item"
+                      >
+                        <Ionicons name="trash-outline" size={14} color={colors.error} />
+                      </Pressable>
+                    </View>
+                  </View>
+                </Pressable>
+              </View>
             );
           })}
         </ScrollView>
@@ -288,9 +532,9 @@ export default function HistoryScreen() {
                   {selectedSession?.tool === 'type' ? 'TEXT' : selectedSession?.tool?.toUpperCase()}
                 </Text>
               </View>
-              {selectedSession?.metadata?.sourceLanguage && selectedSession?.metadata?.targetLanguage && (
+              {selectedSession?.source_language && selectedSession?.target_language && (
                 <Text style={styles.metaLangs}>
-                  {getLanguageByCode(selectedSession.metadata.sourceLanguage)?.name} → {getLanguageByCode(selectedSession.metadata.targetLanguage)?.name}
+                  {getLanguageByCode(selectedSession.source_language)?.name} → {getLanguageByCode(selectedSession.target_language)?.name}
                 </Text>
               )}
             </View>
@@ -308,7 +552,7 @@ export default function HistoryScreen() {
                   )}
                 </View>
                 <Text style={styles.sourceVal}>{selectedSession.source_text || 'Voice input clip'}</Text>
-                
+
                 {selectedSession.translated_text && (
                   <>
                     <View style={styles.inlineDivider} />
@@ -330,10 +574,10 @@ export default function HistoryScreen() {
                 {signedInputUrl && (
                   <View style={{ marginBottom: 20 }}>
                     <Text style={styles.detailSectionHeading}>Scanned Image</Text>
-                    <Image 
-                      source={{ uri: signedInputUrl }} 
-                      style={styles.scannedImage} 
-                      resizeMode="cover" 
+                    <Image
+                      source={{ uri: signedInputUrl }}
+                      style={styles.scannedImage}
+                      resizeMode="cover"
                     />
                   </View>
                 )}
@@ -430,6 +674,24 @@ export default function HistoryScreen() {
                 <Text style={styles.targetVal}>{selectedSession.source_text}</Text>
               </View>
             )}
+
+            {/* Modal level detail actions */}
+            <View style={styles.detailActionsContainer}>
+              <Pressable
+                style={[styles.detailActionBtn, { backgroundColor: colors.backgroundSoft, borderWidth: 1, borderColor: colors.border }]}
+                onPress={() => handleExportItem(selectedSession)}
+              >
+                <Ionicons name="download-outline" size={16} color={colors.textPrimary} style={{ marginRight: 6 }} />
+                <Text style={styles.detailActionText}>Export Text</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.detailActionBtn, { backgroundColor: colors.errorLight }]}
+                onPress={() => handleDeleteItem(selectedSession.id)}
+              >
+                <Ionicons name="trash-outline" size={16} color={colors.error} style={{ marginRight: 6 }} />
+                <Text style={[styles.detailActionText, { color: colors.error }]}>Delete</Text>
+              </Pressable>
+            </View>
           </ScrollView>
         </View>
       </Modal>
@@ -451,7 +713,7 @@ export default function HistoryScreen() {
             </View>
 
             <View style={styles.sheetBody}>
-              <Pressable 
+              <Pressable
                 style={[styles.filterRowItem, !selectedLanguageFilter && styles.filterRowItemActive]}
                 onPress={() => {
                   setSelectedLanguageFilter(null);
@@ -463,7 +725,7 @@ export default function HistoryScreen() {
                 </Text>
               </Pressable>
 
-              <Pressable 
+              <Pressable
                 style={[styles.filterRowItem, selectedLanguageFilter === 'en' && styles.filterRowItemActive]}
                 onPress={() => {
                   setSelectedLanguageFilter('en');
@@ -475,7 +737,7 @@ export default function HistoryScreen() {
                 </Text>
               </Pressable>
 
-              <Pressable 
+              <Pressable
                 style={[styles.filterRowItem, selectedLanguageFilter === 'es' && styles.filterRowItemActive]}
                 onPress={() => {
                   setSelectedLanguageFilter('es');
@@ -494,466 +756,530 @@ export default function HistoryScreen() {
   );
 }
 
-const createStyles = (colors: any) => StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-    borderColor: colors.border,
-  },
-  backButton: {
-    padding: 4,
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontFamily: typography.heading3.fontFamily,
-    fontWeight: '700',
-    color: colors.textPrimary,
-  },
-  filterTrigger: {
-    padding: 4,
-  },
-  searchBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.surfaceSoft,
-    marginHorizontal: 20,
-    marginTop: 16,
-    marginBottom: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  searchInput: {
-    flex: 1,
-    fontSize: 15,
-    fontFamily: typography.body.fontFamily,
-    color: colors.textPrimary,
-  },
-  chipsContainer: {
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    gap: 8,
-  },
-  chip: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: colors.surfaceSoft,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  chipActive: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary,
-  },
-  chipText: {
-    fontSize: 13,
-    fontFamily: typography.captionMedium.fontFamily,
-    color: colors.textSecondary,
-  },
-  chipTextActive: {
-    color: colors.textInverse,
-    fontWeight: '700',
-  },
-  listContainer: {
-    paddingHorizontal: 20,
-    paddingBottom: 24,
-  },
-  historyCard: {
-    backgroundColor: colors.surfaceSoft,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 10,
-  },
-  cardTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  badgeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  typeBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.background,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-    marginRight: 8,
-  },
-  badgeText: {
-    fontSize: 9,
-    fontFamily: typography.captionMedium.fontFamily,
-    fontWeight: '700',
-    color: colors.textMuted,
-  },
-  langPairLabel: {
-    fontSize: 11,
-    fontFamily: typography.caption.fontFamily,
-    color: colors.textMuted,
-  },
-  cardTime: {
-    fontSize: 11,
-    fontFamily: typography.caption.fontFamily,
-    color: colors.textSubtle,
-  },
-  cardTitle: {
-    fontSize: 15,
-    fontFamily: typography.bodyMedium.fontFamily,
-    color: colors.textPrimary,
-  },
-  loaderContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 40,
-    marginTop: 60,
-  },
-  emptyTitle: {
-    fontSize: 16,
-    fontFamily: typography.heading4.fontFamily,
-    color: colors.textPrimary,
-    marginBottom: 6,
-  },
-  emptyDesc: {
-    fontSize: 13,
-    fontFamily: typography.body.fontFamily,
-    color: colors.textMuted,
-    textAlign: 'center',
-  },
-  detailContainer: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  detailHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 24,
-    paddingTop: 20,
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderColor: colors.border,
-  },
-  detailHeaderTitle: {
-    fontSize: 18,
-    fontFamily: typography.heading3.fontFamily,
-    fontWeight: '700',
-    color: colors.textPrimary,
-  },
-  closeButton: {
-    padding: 4,
-  },
-  detailLoader: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  detailScroll: {
-    padding: 24,
-  },
-  metaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  metaLangs: {
-    fontSize: 12,
-    fontFamily: typography.captionMedium.fontFamily,
-    color: colors.textMuted,
-  },
-  detailTitle: {
-    fontSize: 22,
-    fontFamily: typography.heading2.fontFamily,
-    fontWeight: '700',
-    color: colors.textPrimary,
-    marginBottom: 16,
-  },
-  detailDivider: {
-    height: 1,
-    backgroundColor: colors.border,
-    marginBottom: 20,
-  },
-  detailSectionHeading: {
-    fontSize: 13,
-    fontFamily: typography.captionMedium.fontFamily,
-    fontWeight: '700',
-    color: colors.textMuted,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginBottom: 12,
-  },
-  translationDetailCard: {
-    backgroundColor: colors.surfaceSoft,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
-  },
-  textLabel: {
-    fontSize: 9,
-    fontFamily: typography.captionMedium.fontFamily,
-    fontWeight: '700',
-    color: colors.textMuted,
-    letterSpacing: 1,
-    marginBottom: 6,
-  },
-  sourceVal: {
-    fontSize: 15,
-    fontFamily: typography.bodyMedium.fontFamily,
-    color: colors.textPrimary,
-    lineHeight: 20,
-    marginBottom: 12,
-  },
-  inlineDivider: {
-    height: 1,
-    backgroundColor: 'rgba(9, 9, 9, 0.05)',
-    marginVertical: 12,
-  },
-  targetVal: {
-    fontSize: 16,
-    fontFamily: typography.bodySemibold.fontFamily,
-    color: colors.accentPurple,
-    lineHeight: 22,
-  },
-  translitBox: {
-    backgroundColor: 'rgba(124, 108, 208, 0.05)',
-    borderRadius: 10,
-    padding: 10,
-    marginTop: 12,
-  },
-  translitLabel: {
-    fontSize: 8,
-    fontFamily: typography.captionMedium.fontFamily,
-    fontWeight: '700',
-    color: colors.accentPurple,
-    marginBottom: 4,
-  },
-  translitVal: {
-    fontSize: 13,
-    fontFamily: typography.body.fontFamily,
-    color: colors.textSecondary,
-    fontStyle: 'italic',
-  },
-  emptyDetailText: {
-    fontSize: 14,
-    fontFamily: typography.body.fontFamily,
-    color: colors.textMuted,
-  },
-  summaryBox: {
-    backgroundColor: colors.surfaceWarning,
-    borderWidth: 1,
-    borderColor: '#F9E5C9',
-    borderRadius: 16,
-    padding: 16,
-    marginTop: 8,
-    marginBottom: 24,
-  },
-  summaryTitle: {
-    fontSize: 13,
-    fontFamily: typography.bodySemibold.fontFamily,
-    color: colors.warning,
-  },
-  summaryText: {
-    fontSize: 13,
-    fontFamily: typography.body.fontFamily,
-    color: colors.textSecondary,
-    lineHeight: 18,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: colors.overlay,
-    justifyContent: 'flex-end',
-  },
-  filterSheetCard: {
-    backgroundColor: colors.background,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 24,
-    paddingBottom: 40,
-  },
-  sheetHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  sheetTitle: {
-    fontSize: 17,
-    fontFamily: typography.heading4.fontFamily,
-    fontWeight: '700',
-    color: colors.textPrimary,
-  },
-  sheetBody: {
-    gap: 10,
-  },
-  filterRowItem: {
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    backgroundColor: colors.surfaceSoft,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  filterRowItemActive: {
-    backgroundColor: 'rgba(124, 108, 208, 0.08)',
-    borderColor: colors.accentPurple,
-  },
-  filterRowText: {
-    fontSize: 15,
-    fontFamily: typography.bodyMedium.fontFamily,
-    color: colors.textPrimary,
-  },
-  filterRowTextActive: {
-    color: colors.accentPurple,
-    fontWeight: '700',
-  },
-  audioPlayBtn: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: 'rgba(124, 108, 208, 0.1)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  scannedImage: {
-    width: '100%',
-    height: 200,
-    borderRadius: 16,
-    marginBottom: 12,
-  },
-  foodReportCard: {
-    backgroundColor: colors.surfaceSoft,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 16,
-    padding: 16,
-  },
-  foodReportHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    borderBottomWidth: 1,
-    borderColor: 'rgba(9, 9, 9, 0.05)',
-    paddingBottom: 10,
-    marginBottom: 12,
-  },
-  foodReportTitle: {
-    fontSize: 16,
-    fontFamily: typography.heading3.fontFamily,
-    fontWeight: '700',
-    color: colors.textPrimary,
-  },
-  foodReportSubTitle: {
-    fontSize: 11,
-    fontFamily: typography.caption.fontFamily,
-    color: colors.textMuted,
-    marginTop: 2,
-  },
-  matchBadge: {
-    backgroundColor: '#DEF7EC',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#31C48D',
-  },
-  matchBadgeText: {
-    fontSize: 10,
-    fontFamily: typography.captionMedium.fontFamily,
-    fontWeight: '700',
-    color: '#03543F',
-  },
-  macroRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 12,
-  },
-  macroItem: {
-    flex: 1,
-    backgroundColor: colors.background,
-    borderRadius: 12,
-    paddingVertical: 8,
-    alignItems: 'center',
-    marginHorizontal: 3,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  macroValue: {
-    fontSize: 14,
-    fontFamily: typography.heading4.fontFamily,
-    fontWeight: '700',
-    color: colors.textPrimary,
-  },
-  macroLabel: {
-    fontSize: 8,
-    fontFamily: typography.captionMedium.fontFamily,
-    color: colors.textMuted,
-    marginTop: 2,
-    letterSpacing: 0.5,
-  },
-  allergenAlertCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FDE8E8',
-    borderWidth: 1,
-    borderColor: '#F8B4B4',
-    borderRadius: 12,
-    padding: 10,
-  },
-  allergenAlertText: {
-    fontSize: 11,
-    fontFamily: typography.captionMedium.fontFamily,
-    color: '#9B1C1C',
-    marginLeft: 8,
-    flex: 1,
-  },
-  ocrRegionsCard: {
-    backgroundColor: colors.surfaceSoft,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 16,
-    paddingHorizontal: 16,
-  },
-  ocrRegionItem: {
-    paddingVertical: 12,
-  },
-  ocrRegionDivider: {
-    borderBottomWidth: 1,
-    borderColor: 'rgba(9, 9, 9, 0.05)',
-  },
-  ocrRegionSource: {
-    fontSize: 13,
-    fontFamily: typography.body.fontFamily,
-    color: colors.textMuted,
-    marginBottom: 2,
-  },
-  ocrRegionTarget: {
-    fontSize: 14,
-    fontFamily: typography.bodyMedium.fontFamily,
-    color: colors.textPrimary,
-  },
-});
+const createStyles = (colors: any) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: colors.background,
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 20,
+      paddingVertical: 14,
+      borderBottomWidth: 1,
+      borderColor: colors.border,
+    },
+    backButton: {
+      padding: 4,
+    },
+    headerTitle: {
+      fontSize: 18,
+      fontWeight: '700',
+      color: colors.textPrimary,
+    },
+    filterTrigger: {
+      padding: 4,
+    },
+    searchBar: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: colors.backgroundSoft,
+      marginHorizontal: 20,
+      marginTop: 16,
+      marginBottom: 8,
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    searchInput: {
+      flex: 1,
+      fontSize: 14,
+      color: colors.textPrimary,
+    },
+    chipsContainer: {
+      paddingHorizontal: 20,
+      paddingVertical: 10,
+      gap: 8,
+    },
+    chip: {
+      paddingHorizontal: 14,
+      paddingVertical: 6,
+      borderRadius: 16,
+      backgroundColor: colors.backgroundSoft,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    chipActive: {
+      backgroundColor: colors.primary,
+      borderColor: colors.primary,
+    },
+    chipText: {
+      fontSize: 12,
+      fontWeight: '600',
+      color: colors.textSecondary,
+    },
+    chipTextActive: {
+      color: colors.textInverse,
+    },
+    listContainer: {
+      paddingHorizontal: 20,
+      paddingBottom: layout.tabBarHeight + 30,
+      gap: 16,
+    },
+    layeredMemoContainer: {
+      position: 'relative',
+      marginRight: 4,
+      marginBottom: 6,
+    },
+    memoBgLayer: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      width: '100%',
+      height: '100%',
+      borderRadius: 16,
+      borderWidth: 1,
+    },
+    memoNoteCard: {
+      position: 'relative',
+      borderRadius: 16,
+      borderWidth: 1,
+      padding: 16,
+      zIndex: 10,
+      ...shadows.sm,
+    },
+    memoFoldTag: {
+      position: 'absolute',
+      top: 0,
+      right: 0,
+      width: 0,
+      height: 0,
+      borderStyle: 'solid',
+      borderTopWidth: 12,
+      borderRightWidth: 12,
+      borderBottomWidth: 0,
+      borderLeftWidth: 0,
+      borderBottomColor: 'transparent',
+      borderLeftColor: 'transparent',
+      borderTopLeftRadius: 0,
+      borderTopRightRadius: 16,
+      borderBottomLeftRadius: 6,
+      borderBottomRightRadius: 0,
+    },
+    memoHeader: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: 10,
+      marginRight: 10, // Avoid overlapping the fold tag
+    },
+    memoTagBadge: {
+      backgroundColor: colors.backgroundSoft,
+      paddingHorizontal: 8,
+      paddingVertical: 2,
+      borderRadius: 8,
+      borderWidth: 0.5,
+      borderColor: colors.border,
+    },
+    memoTagText: {
+      fontSize: 9,
+      fontWeight: '800',
+    },
+    memoTime: {
+      fontSize: 11,
+      color: colors.textSubtle,
+      fontWeight: '500',
+    },
+    memoBody: {
+      marginBottom: 12,
+    },
+    memoSourceText: {
+      fontSize: 13,
+      fontWeight: '500',
+      color: colors.textSecondary,
+      lineHeight: 18,
+      marginBottom: 6,
+    },
+    memoTranslationText: {
+      fontSize: 15,
+      fontWeight: '700',
+      color: colors.textPrimary,
+      lineHeight: 20,
+    },
+    memoVoiceRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginBottom: 6,
+    },
+    miniWaveform: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 2,
+    },
+    miniWaveBar: {
+      width: 2,
+      borderRadius: 1,
+    },
+    memoCameraLayout: {
+      flexDirection: 'row',
+      gap: 12,
+      alignItems: 'center',
+    },
+    memoThumbnailWrapper: {
+      width: 44,
+      height: 44,
+      borderRadius: 8,
+      backgroundColor: colors.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    memoIconWrapper: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: colors.backgroundSoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    memoCategoryLabel: {
+      fontSize: 9,
+      fontWeight: '800',
+      color: colors.accentGreen,
+      marginBottom: 2,
+    },
+    memoCameraTitle: {
+      fontSize: 14,
+      fontWeight: '700',
+      color: colors.textPrimary,
+    },
+    memoCameraDesc: {
+      fontSize: 12,
+      color: colors.textSecondary,
+    },
+    memoConvoHeader: {
+      fontSize: 11,
+      fontWeight: '700',
+      color: colors.textSecondary,
+      marginBottom: 6,
+    },
+    memoConvoLine: {
+      flexDirection: 'row',
+      gap: 6,
+      alignItems: 'center',
+      marginBottom: 2,
+    },
+    memoConvoSpeaker: {
+      fontSize: 11,
+      fontWeight: '800',
+      color: colors.textSubtle,
+      width: 22,
+    },
+    memoConvoQuote: {
+      fontSize: 13,
+      color: colors.textPrimary,
+      flex: 1,
+    },
+    memoAccentLabel: {
+      fontSize: 10,
+      fontWeight: '700',
+      color: colors.accentOrange,
+      marginBottom: 4,
+    },
+    memoFooter: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      borderTopWidth: 0.5,
+      borderTopColor: colors.border,
+      paddingTop: 8,
+    },
+    memoLangBadge: {
+      fontSize: 11,
+      color: colors.textSecondary,
+      fontWeight: '600',
+    },
+    memoActionRow: {
+      flexDirection: 'row',
+      gap: 8,
+    },
+    memoIconAction: {
+      padding: 4,
+    },
+    loaderContainer: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    emptyContainer: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+      paddingHorizontal: 40,
+      marginTop: 60,
+    },
+    emptyTitle: {
+      fontSize: 16,
+      color: colors.textPrimary,
+      fontWeight: '700',
+      marginBottom: 6,
+    },
+    emptyDesc: {
+      fontSize: 13,
+      color: colors.textMuted,
+      textAlign: 'center',
+    },
+    detailContainer: {
+      flex: 1,
+      backgroundColor: colors.background,
+    },
+    detailHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 24,
+      paddingTop: 20,
+      paddingBottom: 16,
+      borderBottomWidth: 1,
+      borderColor: colors.border,
+    },
+    detailHeaderTitle: {
+      fontSize: 18,
+      fontWeight: '700',
+      color: colors.textPrimary,
+    },
+    closeButton: {
+      padding: 4,
+    },
+    detailScroll: {
+      padding: 24,
+    },
+    metaRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 12,
+    },
+    typeBadge: {
+      backgroundColor: colors.backgroundSoft,
+      paddingHorizontal: 8,
+      paddingVertical: 2,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    badgeText: {
+      fontSize: 9,
+      fontWeight: '700',
+      color: colors.textSecondary,
+    },
+    metaLangs: {
+      fontSize: 12,
+      color: colors.textMuted,
+      fontWeight: '500',
+    },
+    detailTitle: {
+      fontSize: 22,
+      fontWeight: '700',
+      color: colors.textPrimary,
+      marginBottom: 16,
+    },
+    detailDivider: {
+      height: 1,
+      backgroundColor: colors.border,
+      marginBottom: 20,
+    },
+    detailSectionHeading: {
+      fontSize: 12,
+      fontWeight: '700',
+      color: colors.textMuted,
+      textTransform: 'uppercase',
+      letterSpacing: 1,
+      marginBottom: 12,
+    },
+    translationDetailCard: {
+      backgroundColor: colors.backgroundSoft,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 16,
+      padding: 16,
+      marginBottom: 12,
+    },
+    textLabel: {
+      fontSize: 9,
+      fontWeight: '700',
+      color: colors.textMuted,
+      letterSpacing: 1,
+      marginBottom: 6,
+    },
+    sourceVal: {
+      fontSize: 15,
+      color: colors.textPrimary,
+      lineHeight: 20,
+      marginBottom: 12,
+    },
+    inlineDivider: {
+      height: 1,
+      backgroundColor: colors.border,
+      marginVertical: 12,
+    },
+    targetVal: {
+      fontSize: 16,
+      fontWeight: '700',
+      color: colors.accentPurple,
+      lineHeight: 22,
+    },
+    scannedImage: {
+      width: '100%',
+      height: 220,
+      borderRadius: 16,
+    },
+    foodReportCard: {
+      backgroundColor: colors.backgroundSoft,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: colors.border,
+      padding: 16,
+    },
+    foodReportHeader: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'flex-start',
+      marginBottom: 16,
+    },
+    foodReportTitle: {
+      fontSize: 16,
+      fontWeight: '700',
+      color: colors.textPrimary,
+    },
+    foodReportSubTitle: {
+      fontSize: 12,
+      color: colors.textSecondary,
+      marginTop: 2,
+    },
+    matchBadge: {
+      backgroundColor: colors.successLight,
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      borderRadius: 8,
+    },
+    matchBadgeText: {
+      fontSize: 11,
+      fontWeight: '700',
+      color: colors.success,
+    },
+    macroRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      marginBottom: 16,
+    },
+    macroItem: {
+      alignItems: 'center',
+      flex: 1,
+    },
+    macroValue: {
+      fontSize: 16,
+      fontWeight: '800',
+      color: colors.textPrimary,
+    },
+    macroLabel: {
+      fontSize: 9,
+      fontWeight: '700',
+      color: colors.textMuted,
+      marginTop: 2,
+    },
+    allergenAlertCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: colors.warningLight,
+      borderRadius: 10,
+      padding: 10,
+      gap: 8,
+    },
+    allergenAlertText: {
+      fontSize: 12,
+      color: colors.warning,
+      fontWeight: '600',
+      flex: 1,
+    },
+    audioPlayBtn: {
+      width: 24,
+      height: 24,
+      borderRadius: 12,
+      backgroundColor: colors.accentPurple,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    emptyDetailText: {
+      fontSize: 13,
+      color: colors.textSubtle,
+      fontStyle: 'italic',
+    },
+    detailActionsContainer: {
+      flexDirection: 'row',
+      gap: 12,
+      marginTop: 20,
+      marginBottom: 40,
+    },
+    detailActionBtn: {
+      flex: 1,
+      flexDirection: 'row',
+      height: 48,
+      borderRadius: 24,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    detailActionText: {
+      fontSize: 14,
+      fontWeight: '700',
+      color: colors.textPrimary,
+    },
+    modalOverlay: {
+      flex: 1,
+      justifyContent: 'flex-end',
+      backgroundColor: colors.overlay,
+    },
+    filterSheetCard: {
+      backgroundColor: colors.background,
+      borderTopLeftRadius: 24,
+      borderTopRightRadius: 24,
+      padding: 20,
+      paddingBottom: 36,
+    },
+    sheetHeader: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: 16,
+    },
+    sheetTitle: {
+      fontSize: 16,
+      fontWeight: '700',
+      color: colors.textPrimary,
+    },
+    sheetBody: {
+      gap: 8,
+    },
+    filterRowItem: {
+      paddingVertical: 12,
+      paddingHorizontal: 16,
+      borderRadius: 12,
+    },
+    filterRowItemActive: {
+      backgroundColor: colors.backgroundSoft,
+    },
+    filterRowText: {
+      fontSize: 15,
+      fontWeight: '500',
+      color: colors.textSecondary,
+    },
+    filterRowTextActive: {
+      color: colors.accentPurple,
+      fontWeight: '700',
+    },
+  });

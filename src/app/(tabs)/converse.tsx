@@ -10,6 +10,7 @@ import {
   Switch,
   ActivityIndicator,
   Modal,
+  Platform,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
@@ -40,6 +41,16 @@ interface TranscriptSegment {
   timestamp: Date;
 }
 
+const ConverseNativeAudio: React.FC<{
+  playerRef: React.MutableRefObject<any>;
+}> = ({ playerRef }) => {
+  const player = useAudioPlayer('');
+  React.useEffect(() => {
+    playerRef.current = player;
+  }, [player]);
+  return null;
+};
+
 export default function ConverseTab() {
   const router = useRouter();
   const { user } = useAuth();
@@ -49,7 +60,6 @@ export default function ConverseTab() {
 
   const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
-  const historyAudioPlayer = useAudioPlayer('');
 
   const createActivityMutation = useCreateActivity();
   const deleteActivityMutation = useDeleteActivity();
@@ -79,7 +89,7 @@ export default function ConverseTab() {
     isMeteringEnabled: true,
   });
   const recorderState = useAppAudioRecorderState(recorder, 100);
-  const player = useAudioPlayer('');
+  const playerRef = useRef<any>(null);
 
   // Refs for auto-scroll
   const topScrollRef = useRef<ScrollView>(null);
@@ -272,8 +282,13 @@ export default function ConverseTab() {
       const translatedText = result.translated_text;
 
       if (result.generated_audio_url) {
-        player.replace({ uri: result.generated_audio_url });
-        player.play();
+        if (Platform.OS === 'web') {
+          const audio = new Audio(result.generated_audio_url);
+          audio.play().catch((e) => console.warn('[Converse Web Audio] failed:', e));
+        } else if (playerRef.current) {
+          playerRef.current.replace({ uri: result.generated_audio_url });
+          playerRef.current.play();
+        }
       }
 
       const newSegment: TranscriptSegment = {
@@ -700,6 +715,9 @@ export default function ConverseTab() {
           </View>
         </View>
       </Modal>
+      {Platform.OS !== 'web' && (
+        <ConverseNativeAudio playerRef={playerRef} />
+      )}
     </SafeAreaView>
   );
 }

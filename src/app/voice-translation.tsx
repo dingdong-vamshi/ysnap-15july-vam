@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, Pressable, ScrollView, ActivityIndicator, Alert, TextInput, Modal } from 'react-native';
+import { StyleSheet, Text, View, Pressable, ScrollView, ActivityIndicator, Alert, TextInput, Modal, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -21,6 +21,38 @@ import { generateUUID } from '../utils/uuid';
 import { useCreateActivity, useActivityHistoryList, useDeleteActivity } from '../hooks/useActivityHistory';
 import { historyService } from '../services/historyService';
 
+const VoiceTranslationNativeAudio: React.FC<{
+  outputAudioUrl: string | null;
+  isPlaying: boolean;
+  setIsPlaying: (playing: boolean) => void;
+  playingHistoryId: string | null;
+  setPlayingHistoryId: (id: string | null) => void;
+  playerRef: React.MutableRefObject<any>;
+}> = ({ outputAudioUrl, isPlaying, setIsPlaying, playingHistoryId, setPlayingHistoryId, playerRef }) => {
+  const player = useAudioPlayer(outputAudioUrl || '');
+
+  React.useEffect(() => {
+    playerRef.current = player;
+  }, [player]);
+
+  React.useEffect(() => {
+    if (isPlaying && player) {
+      if (!player.playing && player.currentTime >= player.duration - 0.2) {
+        setIsPlaying(false);
+      }
+    }
+  }, [player.playing, player.currentTime, isPlaying]);
+
+  React.useEffect(() => {
+    if (playingHistoryId && player) {
+      if (!player.playing && player.currentTime >= player.duration - 0.2) {
+        setPlayingHistoryId(null);
+      }
+    }
+  }, [player.playing, player.currentTime, playingHistoryId]);
+
+  return null;
+};
 
 export default function VoiceTranslationScreen() {
   const recorder = useAppAudioRecorder({
@@ -34,7 +66,6 @@ export default function VoiceTranslationScreen() {
 
   const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
-  const historyAudioPlayer = useAudioPlayer('');
 
   const createActivityMutation = useCreateActivity();
   const deleteActivityMutation = useDeleteActivity();
@@ -63,7 +94,8 @@ export default function VoiceTranslationScreen() {
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [playbackProgress, setPlaybackProgress] = useState(0); // 0 to 100
   const [outputAudioUrl, setOutputAudioUrl] = useState<string | null>(null);
-  const player = useAudioPlayer(outputAudioUrl || '');
+  const playerRef = useRef<any>(null);
+  const webAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const timerRef = useRef<any>(null);
   const waveRef = useRef<any>(null);
@@ -101,7 +133,11 @@ export default function VoiceTranslationScreen() {
     statusText === 'Generating voice...' || statusText === 'Saving history...';
 
   const resetTranslationResult = () => {
-    player.pause();
+    if (Platform.OS === 'web') {
+      if (webAudioRef.current) webAudioRef.current.pause();
+    } else if (playerRef.current) {
+      playerRef.current.pause();
+    }
     setIsPlaying(false);
     setOutputAudioUrl(null);
     setPlaybackProgress(0);
@@ -161,24 +197,24 @@ export default function VoiceTranslationScreen() {
   // Sync timeline progress with real audio duration
   useEffect(() => {
     let progressTimer: any;
-    if (isPlaying && player.duration > 0) {
+    if (Platform.OS !== 'web' && isPlaying && playerRef.current && playerRef.current.duration > 0) {
       progressTimer = setInterval(() => {
-        const currentProgress = (player.currentTime / player.duration) * 100;
+        const currentProgress = (playerRef.current.currentTime / playerRef.current.duration) * 100;
         setPlaybackProgress(Math.min(100, currentProgress));
       }, 50);
     }
     return () => clearInterval(progressTimer);
-  }, [isPlaying, player.currentTime, player.duration]);
+  }, [isPlaying, playerRef.current?.currentTime, playerRef.current?.duration]);
 
   // Handle playback completion
   useEffect(() => {
-    if (isPlaying && !player.playing && player.currentTime >= player.duration - 0.2) {
+    if (Platform.OS !== 'web' && isPlaying && playerRef.current && !playerRef.current.playing && playerRef.current.currentTime >= playerRef.current.duration - 0.2) {
       setIsPlaying(false);
       setPlaybackProgress(100);
       setTimeout(() => setPlaybackProgress(0), 200);
       setStatusText('Translation ready');
     }
-  }, [player.playing, player.currentTime]);
+  }, [playerRef.current?.playing, playerRef.current?.currentTime]);
 
   const handleStartRecording = async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
@@ -245,8 +281,24 @@ export default function VoiceTranslationScreen() {
 
       if (result.generated_audio_url) {
         setOutputAudioUrl(result.generated_audio_url);
-        player.replace({ uri: result.generated_audio_url });
-        player.play();
+        if (Platform.OS === 'web') {
+          if (webAudioRef.current) webAudioRef.current.pause();
+          webAudioRef.current = new Audio(result.generated_audio_url);
+          webAudioRef.current.addEventListener('timeupdate', () => {
+            if (webAudioRef.current && webAudioRef.current.duration > 0) {
+              const currentProgress = (webAudioRef.current.currentTime / webAudioRef.current.duration) * 100;
+              setPlaybackProgress(Math.min(100, currentProgress));
+            }
+          });
+          webAudioRef.current.onended = () => {
+            setIsPlaying(false);
+            setPlaybackProgress(0);
+          };
+          webAudioRef.current.play().catch((e) => console.warn('[Web Audio] failed:', e));
+        } else if (playerRef.current) {
+          playerRef.current.replace({ uri: result.generated_audio_url });
+          playerRef.current.play();
+        }
         setIsPlaying(true);
         setPlaybackProgress(0);
         setStatusText('Translation ready');
@@ -307,7 +359,11 @@ export default function VoiceTranslationScreen() {
   const handleTogglePlayback = async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (isPlaying) {
-      player.pause();
+      if (Platform.OS === 'web') {
+        if (webAudioRef.current) webAudioRef.current.pause();
+      } else if (playerRef.current) {
+        playerRef.current.pause();
+      }
       setIsPlaying(false);
       return;
     }
@@ -329,8 +385,24 @@ export default function VoiceTranslationScreen() {
         }
       }
       setStatusText('Playing pronunciation...');
-      player.replace({ uri: audioUrl });
-      player.play();
+      if (Platform.OS === 'web') {
+        if (webAudioRef.current) webAudioRef.current.pause();
+        webAudioRef.current = new Audio(audioUrl);
+        webAudioRef.current.addEventListener('timeupdate', () => {
+          if (webAudioRef.current && webAudioRef.current.duration > 0) {
+            const currentProgress = (webAudioRef.current.currentTime / webAudioRef.current.duration) * 100;
+            setPlaybackProgress(Math.min(100, currentProgress));
+          }
+        });
+        webAudioRef.current.onended = () => {
+          setIsPlaying(false);
+          setPlaybackProgress(0);
+        };
+        webAudioRef.current.play().catch((e) => console.warn('[Web Audio] failed:', e));
+      } else if (playerRef.current) {
+        playerRef.current.replace({ uri: audioUrl });
+        playerRef.current.play();
+      }
     } catch (err: any) {
       console.error(err);
       Alert.alert('TTS Playback Failed', err.message || 'Error occurred while calling Edge Function.');
@@ -380,8 +452,24 @@ export default function VoiceTranslationScreen() {
       );
       if (ttsResult && ttsResult.url) {
         setOutputAudioUrl(ttsResult.url);
-        player.replace({ uri: ttsResult.url });
-        player.play();
+        if (Platform.OS === 'web') {
+          if (webAudioRef.current) webAudioRef.current.pause();
+          webAudioRef.current = new Audio(ttsResult.url);
+          webAudioRef.current.addEventListener('timeupdate', () => {
+            if (webAudioRef.current && webAudioRef.current.duration > 0) {
+              const currentProgress = (webAudioRef.current.currentTime / webAudioRef.current.duration) * 100;
+              setPlaybackProgress(Math.min(100, currentProgress));
+            }
+          });
+          webAudioRef.current.onended = () => {
+            setIsPlaying(false);
+            setPlaybackProgress(0);
+          };
+          webAudioRef.current.play().catch((e) => console.warn(e));
+        } else if (playerRef.current) {
+          playerRef.current.replace({ uri: ttsResult.url });
+          playerRef.current.play();
+        }
         setIsPlaying(true);
         setPlaybackProgress(0);
         setStatusText('Translation ready');
@@ -425,7 +513,9 @@ export default function VoiceTranslationScreen() {
       historyService.getSignedUrl(item.output_asset_path).then((url) => {
         if (url) {
           setOutputAudioUrl(url);
-          player.replace({ uri: url });
+          if (Platform.OS !== 'web' && playerRef.current) {
+            playerRef.current.replace({ uri: url });
+          }
         }
       });
     } else {
@@ -468,7 +558,11 @@ export default function VoiceTranslationScreen() {
   const handlePlayHistoryAudio = async (item: any) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (playingHistoryId === item.id) {
-      historyAudioPlayer.pause();
+      if (Platform.OS === 'web') {
+        if (webAudioRef.current) webAudioRef.current.pause();
+      } else if (playerRef.current) {
+        playerRef.current.pause();
+      }
       setPlayingHistoryId(null);
       return;
     }
@@ -480,20 +574,21 @@ export default function VoiceTranslationScreen() {
       const url = await historyService.getSignedUrl(item.output_asset_path);
       if (url) {
         setPlayingHistoryId(item.id);
-        historyAudioPlayer.replace({ uri: url });
-        historyAudioPlayer.play();
+        if (Platform.OS === 'web') {
+          if (webAudioRef.current) webAudioRef.current.pause();
+          webAudioRef.current = new Audio(url);
+          webAudioRef.current.onended = () => setPlayingHistoryId(null);
+          webAudioRef.current.play().catch((e) => console.warn(e));
+        } else if (playerRef.current) {
+          playerRef.current.replace({ uri: url });
+          playerRef.current.play();
+        }
       }
     } catch (err: any) {
       console.error(err);
       Alert.alert('Playback Error', 'Failed to play history audio.');
     }
   };
-
-  useEffect(() => {
-    if (playingHistoryId && !historyAudioPlayer.playing && historyAudioPlayer.currentTime >= historyAudioPlayer.duration - 0.2) {
-      setPlayingHistoryId(null);
-    }
-  }, [historyAudioPlayer.playing, historyAudioPlayer.currentTime]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -763,6 +858,16 @@ export default function VoiceTranslationScreen() {
           </View>
         </View>
       </Modal>
+      {Platform.OS !== 'web' && (
+        <VoiceTranslationNativeAudio
+          outputAudioUrl={outputAudioUrl}
+          isPlaying={isPlaying}
+          setIsPlaying={setIsPlaying}
+          playingHistoryId={playingHistoryId}
+          setPlayingHistoryId={setPlayingHistoryId}
+          playerRef={playerRef}
+        />
+      )}
     </SafeAreaView>
   );
 }

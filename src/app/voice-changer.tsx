@@ -36,6 +36,39 @@ interface VoiceOption {
   accent: string;
 }
 
+const VoiceChangerNativeAudio: React.FC<{
+  outputAudioUrl: string | null;
+  isPlayingOutput: boolean;
+  setIsPlayingOutput: (playing: boolean) => void;
+  playingHistoryId: string | null;
+  setPlayingHistoryId: (id: string | null) => void;
+  playerRef: React.MutableRefObject<any>;
+}> = ({ outputAudioUrl, isPlayingOutput, setIsPlayingOutput, playingHistoryId, setPlayingHistoryId, playerRef }) => {
+  const player = useAudioPlayer(outputAudioUrl || '');
+
+  React.useEffect(() => {
+    playerRef.current = player;
+  }, [player]);
+
+  React.useEffect(() => {
+    if (isPlayingOutput && player) {
+      if (!player.playing && player.currentTime >= player.duration - 0.2) {
+        setIsPlayingOutput(false);
+      }
+    }
+  }, [player.playing, player.currentTime, isPlayingOutput]);
+
+  React.useEffect(() => {
+    if (playingHistoryId && player) {
+      if (!player.playing && player.currentTime >= player.duration - 0.2) {
+        setPlayingHistoryId(null);
+      }
+    }
+  }, [player.playing, player.currentTime, playingHistoryId]);
+
+  return null;
+};
+
 export default function VoiceChangerScreen() {
   const router = useRouter();
   const { user } = useAuth();
@@ -43,7 +76,6 @@ export default function VoiceChangerScreen() {
 
   const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
-  const historyAudioPlayer = useAudioPlayer('');
 
   const createActivityMutation = useCreateActivity();
   const deleteActivityMutation = useDeleteActivity();
@@ -76,7 +108,8 @@ export default function VoiceChangerScreen() {
 
   // Expo Audio SDK 57 recorder & player hooks
   const recorder = useAppAudioRecorder();
-  const player = useAudioPlayer(outputAudioUrl || '');
+  const playerRef = useRef<any>(null);
+  const webAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Fetch cloned voice profiles
   const { data: clonedVoices = [] } = useQuery<any[]>({
@@ -117,11 +150,7 @@ export default function VoiceChangerScreen() {
     };
   }, []);
 
-  useEffect(() => {
-    if (isPlayingOutput && !player.playing && player.currentTime >= player.duration - 0.2) {
-      setIsPlayingOutput(false);
-    }
-  }, [player.playing, player.currentTime]);
+
 
   const handleToggleRecord = async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -269,12 +298,24 @@ export default function VoiceChangerScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
     if (isPlayingOutput) {
-      player.pause();
+      if (Platform.OS === 'web') {
+        if (webAudioRef.current) webAudioRef.current.pause();
+      } else if (playerRef.current) {
+        playerRef.current.pause();
+      }
       setIsPlayingOutput(false);
     } else {
       if (outputAudioUrl) {
-        player.replace({ uri: outputAudioUrl });
-        player.play();
+        if (Platform.OS === 'web') {
+          if (!webAudioRef.current || webAudioRef.current.src !== outputAudioUrl) {
+            webAudioRef.current = new Audio(outputAudioUrl);
+            webAudioRef.current.onended = () => setIsPlayingOutput(false);
+          }
+          webAudioRef.current.play().catch((e) => console.warn(e));
+        } else if (playerRef.current) {
+          playerRef.current.replace({ uri: outputAudioUrl });
+          playerRef.current.play();
+        }
         setIsPlayingOutput(true);
       }
     }
@@ -287,7 +328,11 @@ export default function VoiceChangerScreen() {
     setOutputAudioUrl(null);
     setSourceTranscript('');
     setIsRealConnected(false);
-    player.pause();
+    if (Platform.OS === 'web') {
+      if (webAudioRef.current) webAudioRef.current.pause();
+    } else if (playerRef.current) {
+      playerRef.current.pause();
+    }
     setIsPlayingOutput(false);
   };
 
@@ -326,7 +371,9 @@ export default function VoiceChangerScreen() {
       historyService.getSignedUrl(item.output_asset_path).then((url) => {
         if (url) {
           setOutputAudioUrl(url);
-          player.replace({ uri: url });
+          if (Platform.OS !== 'web' && playerRef.current) {
+            playerRef.current.replace({ uri: url });
+          }
         }
       });
     } else {
@@ -369,7 +416,11 @@ export default function VoiceChangerScreen() {
   const handlePlayHistoryAudio = async (item: any) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (playingHistoryId === item.id) {
-      historyAudioPlayer.pause();
+      if (Platform.OS === 'web') {
+        if (webAudioRef.current) webAudioRef.current.pause();
+      } else if (playerRef.current) {
+        playerRef.current.pause();
+      }
       setPlayingHistoryId(null);
       return;
     }
@@ -381,20 +432,21 @@ export default function VoiceChangerScreen() {
       const url = await historyService.getSignedUrl(item.output_asset_path);
       if (url) {
         setPlayingHistoryId(item.id);
-        historyAudioPlayer.replace({ uri: url });
-        historyAudioPlayer.play();
+        if (Platform.OS === 'web') {
+          if (webAudioRef.current) webAudioRef.current.pause();
+          webAudioRef.current = new Audio(url);
+          webAudioRef.current.onended = () => setPlayingHistoryId(null);
+          webAudioRef.current.play().catch((e) => console.warn(e));
+        } else if (playerRef.current) {
+          playerRef.current.replace({ uri: url });
+          playerRef.current.play();
+        }
       }
     } catch (err: any) {
       console.error(err);
       Alert.alert('Playback Error', 'Failed to play history audio.');
     }
   };
-
-  useEffect(() => {
-    if (playingHistoryId && !historyAudioPlayer.playing && historyAudioPlayer.currentTime >= historyAudioPlayer.duration - 0.2) {
-      setPlayingHistoryId(null);
-    }
-  }, [historyAudioPlayer.playing, historyAudioPlayer.currentTime]);
 
   const selectedVoiceName = voiceOptions.find(v => v.id === selectedVoiceId)?.name || 'Selected voice';
 
@@ -607,6 +659,16 @@ export default function VoiceChangerScreen() {
           )}
         </View>
       </ScrollView>
+      {Platform.OS !== 'web' && (
+        <VoiceChangerNativeAudio
+          outputAudioUrl={outputAudioUrl}
+          isPlayingOutput={isPlayingOutput}
+          setIsPlayingOutput={setIsPlayingOutput}
+          playingHistoryId={playingHistoryId}
+          setPlayingHistoryId={setPlayingHistoryId}
+          playerRef={playerRef}
+        />
+      )}
     </SafeAreaView>
   );
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   StyleSheet,
   Text,
@@ -8,6 +8,7 @@ import {
   SafeAreaView,
   ActivityIndicator,
   Alert,
+  Platform,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
@@ -23,6 +24,28 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { elevenLabsService, Voice } from '../services/elevenLabs';
 
+const VoiceLibraryNativeAudio: React.FC<{
+  playingVoiceId: string | null;
+  setPlayingVoiceId: (id: string | null) => void;
+  playerRef: React.MutableRefObject<any>;
+}> = ({ playingVoiceId, setPlayingVoiceId, playerRef }) => {
+  const player = useAudioPlayer('');
+
+  React.useEffect(() => {
+    playerRef.current = player;
+  }, [player]);
+
+  React.useEffect(() => {
+    if (playingVoiceId && player) {
+      if (!player.playing && player.currentTime >= player.duration - 0.2) {
+        setPlayingVoiceId(null);
+      }
+    }
+  }, [player.playing, player.currentTime, playingVoiceId]);
+
+  return null;
+};
+
 export default function VoiceLibraryScreen() {
   const router = useRouter();
   const { user } = useAuth();
@@ -33,7 +56,8 @@ export default function VoiceLibraryScreen() {
   const [isRealConnected, setIsRealConnected] = useState(false);
 
   // Setup real audio player hook
-  const player = useAudioPlayer('');
+  const playerRef = useRef<any>(null);
+  const webAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Fetch Cloned Voices from Supabase
   const { data: clonedVoices = [] } = useQuery<any[]>({
@@ -92,7 +116,11 @@ export default function VoiceLibraryScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     
     if (playingVoiceId === voiceId) {
-      player.pause();
+      if (Platform.OS === 'web') {
+        if (webAudioRef.current) webAudioRef.current.pause();
+      } else if (playerRef.current) {
+        playerRef.current.pause();
+      }
       setPlayingVoiceId(null);
     } else {
       if (!previewUrl) {
@@ -100,19 +128,24 @@ export default function VoiceLibraryScreen() {
         return;
       }
       setPlayingVoiceId(voiceId);
-      player.replace({ uri: previewUrl });
-      player.play();
+      if (Platform.OS === 'web') {
+        if (webAudioRef.current) webAudioRef.current.pause();
+        webAudioRef.current = new Audio(previewUrl);
+        webAudioRef.current.onended = () => setPlayingVoiceId(null);
+        webAudioRef.current.play().catch((e) => console.warn(e));
+      } else if (playerRef.current) {
+        playerRef.current.replace({ uri: previewUrl });
+        playerRef.current.play();
+      }
     }
   };
 
-  useEffect(() => {
-    if (playingVoiceId && !player.playing && player.currentTime >= player.duration - 0.2) {
-      setPlayingVoiceId(null);
-    }
-  }, [player.playing, player.currentTime]);
-
   const stopAudio = () => {
-    player.pause();
+    if (Platform.OS === 'web') {
+      if (webAudioRef.current) webAudioRef.current.pause();
+    } else if (playerRef.current) {
+      playerRef.current.pause();
+    }
     setPlayingVoiceId(null);
   };
 
@@ -303,6 +336,13 @@ export default function VoiceLibraryScreen() {
         </View>
 
       </ScrollView>
+      {Platform.OS !== 'web' && (
+        <VoiceLibraryNativeAudio
+          playingVoiceId={playingVoiceId}
+          setPlayingVoiceId={setPlayingVoiceId}
+          playerRef={playerRef}
+        />
+      )}
     </SafeAreaView>
   );
 }

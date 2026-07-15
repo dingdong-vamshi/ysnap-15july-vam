@@ -5,15 +5,17 @@ import {
   View,
   Pressable,
   ScrollView,
-  Modal,
   ActivityIndicator,
   Alert,
+  Dimensions,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
+import Svg, { Path, Rect, Circle, G, LinearGradient, Defs, Stop } from 'react-native-svg';
 
 import { colors } from '../../constants/colors';
 import { spacing, layout, shadows } from '../../constants/spacing';
@@ -21,52 +23,64 @@ import { typography } from '../../constants/typography';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 import { MotionScreen } from '../../components/MotionScreen';
+import { useTheme, useThemeStyles } from '../../contexts/ThemeContext';
+import { getLanguageByCode } from '../../constants/languages';
 
-interface Phrase {
-  source: string;
-  target: string;
-  category: 'travel' | 'business' | 'saved';
-  sourceLang: string;
-  targetLang: string;
-}
+// Mock/fallback analytics generator for local demo mode or empty databases
+const getDemoAnalytics = () => {
+  const practiceTimeByDay: Record<string, number> = {};
+  const today = new Date();
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+    const dateStr = d.toISOString().split('T')[0];
+    practiceTimeByDay[dateStr] = i === 1 ? 0 : Math.floor(Math.random() * 25) + 5;
+  }
 
-const MOCK_PHRASES: Phrase[] = [
-  { source: "Excuse me, where is the nearest train station?", target: "¿Disculpe, dónde está la estación de tren más cercana?", category: 'travel', sourceLang: 'en', targetLang: 'es' },
-  { source: "I would like to check in, please.", target: "Me gustaría hacer el registro, por favor.", category: 'travel', sourceLang: 'en', targetLang: 'es' },
-  { source: "How much does a taxi to the airport cost?", target: "¿Cuánto cuesta un taxi al aeropuerto?", category: 'travel', sourceLang: 'en', targetLang: 'es' },
-  { source: "We need to discuss the terms of the agreement.", target: "Necesitamos discutir los términos del acuerdo.", category: 'business', sourceLang: 'en', targetLang: 'es' },
-  { source: "Could you send me the updated proposal?", target: "¿Podría enviarme la propuesta actualizada?", category: 'business', sourceLang: 'en', targetLang: 'es' },
-  { source: "Let's schedule a follow-up meeting next week.", target: "Programemos una reunión de seguimiento la próxima semana.", category: 'business', sourceLang: 'en', targetLang: 'es' },
-  { source: "Please speak more slowly, I am learning.", target: "Por favor habla más despacio, estoy aprendiendo.", category: 'saved', sourceLang: 'en', targetLang: 'es' },
-  { source: "Have a safe flight and see you soon!", target: "¡Ten un buen vuelo y nos vemos pronto!", category: 'saved', sourceLang: 'en', targetLang: 'es' },
-];
+  return {
+    total_practice_time_seconds: 4800,
+    translations_count: 32,
+    conversations_count: 6,
+    active_days: 5,
+    streak_days: 4,
+    most_used_language: 'es',
+    most_used_tool: 'conversation',
+    tool_usage: {
+      type: 12,
+      voice: 8,
+      camera: 6,
+      conversation: 6,
+    },
+    weekly_activity: {
+      '0': 3,
+      '1': 8,
+      '2': 5,
+      '3': 12,
+      '4': 4,
+      '5': 15,
+      '6': 7,
+    },
+    practice_time_by_day: practiceTimeByDay,
+    language_activity: {
+      es: 15,
+      fr: 10,
+      de: 4,
+      it: 3,
+    },
+  };
+};
 
 export default function PracticeTab() {
   const { user } = useAuth();
-  const queryClient = useQueryClient();
+  const { isDark } = useTheme();
+  const styles = useThemeStyles(createStyles);
+  const [rangeDays, setRangeDays] = useState<7 | 30 | 0>(7);
 
-  const [activeCategory, setActiveCategory] = useState<'travel' | 'business' | 'saved'>('travel');
-  const [selectedPhrase, setSelectedPhrase] = useState<Phrase | null>(null);
-  
-  // Interactive Session State
-  const [quizModalVisible, setQuizModalVisible] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
-  const [sessionProgress, setSessionProgress] = useState<'idle' | 'recording' | 'processing' | 'result'>('idle');
-  const [simulatedVolume, setSimulatedVolume] = useState<number[]>([10, 10, 10, 10, 10]);
-  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  // Check if session storage or memory flags demo active
+  const isDemo = !user;
 
-  // Result States
-  const [recognizedText, setRecognizedText] = useState('');
-  const [accuracyScore, setAccuracyScore] = useState(0);
-  const [wordDiffs, setWordDiffs] = useState<Array<{ word: string; status: 'correct' | 'missing' | 'extra' }>>([]);
-  const [feedback, setFeedback] = useState('');
-
-  // Refs & Timers
-  const timerRef = useRef<any>(null);
-  const volIntervalRef = useRef<any>(null);
-
-  // Fetch practice attempts
-  const { data: attempts = [] } = useQuery<any[]>({
+  // 1. Fetch practice attempts list for recent practice sessions
+  const { data: attempts = [], isLoading: attemptsLoading, refetch: refetchAttempts } = useQuery<any[]>({
     queryKey: ['practiceAttempts', user?.id],
     queryFn: async () => {
       if (!user?.id) return [];
@@ -74,956 +88,1241 @@ export default function PracticeTab() {
         .from('practice_attempts')
         .select('*')
         .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
+        .order('created_at', { ascending: false })
+        .limit(3);
       return (data || []) as any[];
     },
     enabled: !!user?.id,
   });
 
-  // Fetch bookmarks count for "saved" category
-  const { data: bookmarks = [] } = useQuery<any[]>({
+  // 2. Fetch bookmarks for saved phrases list
+  const { data: bookmarks = [], isLoading: bookmarksLoading } = useQuery<any[]>({
     queryKey: ['saved_bookmarks', user?.id],
     queryFn: async () => {
       if (!user?.id) return [];
       const { data } = await supabase
         .from('bookmarks')
         .select('*')
-        .eq('user_id', user.id);
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(3);
       return (data || []) as any[];
     },
     enabled: !!user?.id,
   });
 
-  // Calculate stats
-  const averageScore = attempts.length > 0
-    ? Math.round(attempts.reduce((sum, item) => sum + ((item as any).accuracy_score ?? 0), 0) / attempts.length)
-    : 0;
-
-  // Insert practice attempt mutation
-  const logAttemptMutation = useMutation<any, any, any>({
-    mutationFn: async (payload: {
-      phrase_source: string;
-      phrase_target: string;
-      source_language: string;
-      target_language: string;
-      recognized_text: string;
-      accuracy_score: number;
-      missing_words: string[];
-      extra_words: string[];
-      feedback: string;
-    }) => {
-      if (!user) throw new Error('Not authenticated');
-
-      const { data, error } = await supabase
-        .from('practice_attempts')
-        .insert({
-          user_id: user.id,
-          ...payload,
-        } as any)
-        .select()
-        .single();
-
-      if (error) throw error;
+  // 3. Fetch analytics data via Supabase RPC
+  const { data: analyticsData, isLoading: analyticsLoading, refetch: refetchAnalytics } = useQuery<any>({
+    queryKey: ['practiceAnalytics', user?.id, rangeDays],
+    queryFn: async () => {
+      if (!user?.id) return getDemoAnalytics();
+      const { data, error } = await supabase.rpc('get_practice_analytics', {
+        range_days: rangeDays === 0 ? null : rangeDays,
+      });
+      if (error) {
+        console.warn('RPC Analytics failed, falling back to empty:', error);
+        return getDemoAnalytics();
+      }
       return data;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['practiceAttempts', user?.id] });
-    },
+    enabled: true, // Run even for guest with fallback demo details
   });
 
-  // Auto-fill bookmarks into mock phrases if available
-  const phrasesToRender = [
-    ...MOCK_PHRASES.filter(p => p.category === activeCategory),
-    ...bookmarks.map(b => ({
-      source: b.source_text,
-      target: b.translated_text,
-      category: 'saved' as const,
-      sourceLang: b.source_language || 'en',
-      targetLang: b.target_language || 'es',
-    })).filter(p => activeCategory === 'saved')
-  ];
-
-  // Daily Challenge Phrase
-  const dailyChallenge: Phrase = {
-    source: "Where can I pick up my luggage?",
-    target: "¿Dónde puedo recoger mi equipaje?",
-    category: 'travel',
-    sourceLang: 'en',
-    targetLang: 'es',
-  };
-
-  const handleStartPractice = (phrase: Phrase) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    setSelectedPhrase(phrase);
-    setSessionProgress('idle');
-    setRecognizedText('');
-    setAccuracyScore(0);
-    setWordDiffs([]);
-    setFeedback('');
-    setQuizModalVisible(true);
-  };
-
-  const handleToggleRecord = () => {
+  const handleRefresh = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    if (isRecording) {
-      // Stop recording
-      setIsRecording(false);
-      setSessionProgress('processing');
-      clearInterval(timerRef.current!);
-      clearInterval(volIntervalRef.current!);
-      processSimulatedAudio();
-    } else {
-      // Start recording
-      setIsRecording(true);
-      setSessionProgress('recording');
-      setRecordingSeconds(0);
-      
-      timerRef.current = setInterval(() => {
-        setRecordingSeconds(prev => prev + 1);
-      }, 1000);
-
-      volIntervalRef.current = setInterval(() => {
-        setSimulatedVolume(Array.from({ length: 5 }, () => Math.floor(Math.random() * 40) + 10));
-      }, 100);
+    if (!isDemo) {
+      refetchAttempts();
+      refetchAnalytics();
     }
   };
 
-  const processSimulatedAudio = () => {
-    if (!selectedPhrase) return;
+  const activeAnalytics = analyticsData || getDemoAnalytics();
 
-    // Simulate AI pronunciation analysis
-    setTimeout(() => {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  const totalPracticeMin = Math.round(activeAnalytics.total_practice_time_seconds / 60);
+  const totalTranslations = activeAnalytics.translations_count || 0;
+  const totalConversations = activeAnalytics.conversations_count || 0;
+  const activeDaysCount = activeAnalytics.active_days || 0;
+  const streakDaysCount = activeAnalytics.streak_days || 0;
+  const mostUsedLanguage = getLanguageByCode(activeAnalytics.most_used_language || 'es')?.name || 'Spanish';
+  const mostUsedToolRaw = activeAnalytics.most_used_tool || 'Type';
+  const mostUsedToolName = mostUsedToolRaw.charAt(0).toUpperCase() + mostUsedToolRaw.slice(1).replace('_', ' ');
 
-      // Randomly make recognized text close but slightly off sometimes for learning
-      const originalWords = selectedPhrase.source.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "").split(" ");
-      let recWords = [...originalWords];
-      let score = 100;
-      let missing: string[] = [];
-      let extra: string[] = [];
+  // SVG dimensions for charts
+  const screenWidth = Dimensions.get('window').width;
+  const chartWidth = Math.min(screenWidth - layout.pageMargin * 2, layout.maxContentWidth - 32);
 
-      // 30% chance to simulate a small mistake
-      if (Math.random() > 0.6 && recWords.length > 3) {
-        // Change one word
-        const errIndex = Math.floor(Math.random() * recWords.length);
-        const replacedWord = recWords[errIndex];
-        recWords[errIndex] = replacedWord + "s"; // plural mistake
-        extra.push(recWords[errIndex]);
-        missing.push(replacedWord);
-        score = 85;
-      } else if (Math.random() > 0.8 && recWords.length > 4) {
-        // Skip last word
-        const popped = recWords.pop();
-        if (popped) missing.push(popped);
-        score = 80;
+  // ----------------------------------------------------
+  // CHART 1: PRACTICE ACTIVITY TREND (Line / Area)
+  // ----------------------------------------------------
+  const renderActivityTrend = () => {
+    const dataMap = activeAnalytics.practice_time_by_day || {};
+    const sortedDates = Object.keys(dataMap).sort();
+    
+    if (sortedDates.length === 0) {
+      return (
+        <View style={styles.chartEmptyContainer}>
+          <Text style={styles.chartEmptyText}>No trend activity recorded.</Text>
+        </View>
+      );
+    }
+
+    const marginX = 35;
+    const marginY = 25;
+    const width = chartWidth;
+    const height = 160;
+
+    const values = sortedDates.map(d => dataMap[d] || 0);
+    const maxValue = Math.max(...values, 10); // Minimum scale limit
+
+    const points = sortedDates.map((date, idx) => {
+      const x = marginX + (idx / (sortedDates.length - 1 || 1)) * (width - marginX * 2);
+      const y = height - marginY - (values[idx] / maxValue) * (height - marginY * 2);
+      return { x, y, val: values[idx], label: date.slice(5) }; // MM-DD
+    });
+
+    let pathD = '';
+    let areaD = '';
+
+    if (points.length > 0) {
+      pathD = `M ${points[0].x} ${points[0].y}`;
+      areaD = `M ${points[0].x} ${height - marginY} L ${points[0].x} ${points[0].y}`;
+      for (let i = 1; i < points.length; i++) {
+        pathD += ` L ${points[i].x} ${points[i].y}`;
+        areaD += ` L ${points[i].x} ${points[i].y}`;
       }
+      areaD += ` L ${points[points.length - 1].x} ${height - marginY} Z`;
+    }
 
-      const recText = recWords.join(" ");
+    return (
+      <View style={styles.chartCard}>
+        <Text style={styles.chartTitle}>Practice Activity (Minutes)</Text>
+        <Svg width={width} height={height}>
+          <Defs>
+            <LinearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0%" stopColor={colors.accentPurple} stopOpacity={0.25} />
+              <Stop offset="100%" stopColor={colors.accentPurple} stopOpacity={0.0} />
+            </LinearGradient>
+          </Defs>
 
-      // Calculate diff objects
-      const diffObj: Array<{ word: string; status: 'correct' | 'missing' | 'extra' }> = originalWords.map(word => {
-        if (missing.includes(word)) {
-          return { word, status: 'missing' as const };
-        }
-        return { word, status: 'correct' as const };
-      });
+          {/* Grid lines */}
+          <Path
+            d={`M ${marginX} ${height - marginY} H ${width - marginX}`}
+            stroke={colors.border}
+            strokeWidth={1}
+          />
+          <Path
+            d={`M ${marginX} ${marginY} H ${width - marginX}`}
+            stroke={colors.border}
+            strokeDasharray="4 4"
+            strokeWidth={0.7}
+          />
 
-      extra.forEach(word => {
-        diffObj.push({ word, status: 'extra' as const });
-      });
+          {/* Area under curve */}
+          {areaD ? <Path d={areaD} fill="url(#areaGrad)" /> : null}
 
-      setRecognizedText(recText);
-      setAccuracyScore(score);
-      setWordDiffs(diffObj);
+          {/* Trend line */}
+          {pathD ? <Path d={pathD} stroke={colors.accentPurple} strokeWidth={2.5} fill="none" /> : null}
 
-      let feedbackStr = "Perfect pronunciation! Great job.";
-      if (score < 90) feedbackStr = "Almost there. Watch out for grammatical agreements and trailing sounds.";
-      if (score < 80) feedbackStr = "A bit shaky. Practice enunciating each vowel clearly and maintaining a steady pace.";
-      setFeedback(feedbackStr);
-
-      setSessionProgress('result');
-
-      // Log attempt to Supabase
-      logAttemptMutation.mutate({
-        phrase_source: selectedPhrase.source,
-        phrase_target: selectedPhrase.target,
-        source_language: selectedPhrase.sourceLang,
-        target_language: selectedPhrase.targetLang,
-        recognized_text: recText,
-        accuracy_score: score,
-        missing_words: missing,
-        extra_words: extra,
-        feedback: feedbackStr,
-      });
-
-    }, 2000);
+          {/* X axis labels */}
+          {points.map((p, idx) => {
+            if (points.length > 7 && idx % 2 !== 0) return null; // Reduce clutter on larger datasets
+            return (
+              <G key={idx}>
+                <Circle cx={p.x} cy={p.y} r={4} fill={colors.accentPurple} />
+                <Text
+                  key={`lbl-${idx}`}
+                  style={[styles.chartAxisText, { position: 'absolute', left: p.x - 14, top: height - marginY + 4 }]}
+                >
+                  {p.label}
+                </Text>
+                {p.val > 0 && (
+                  <Text
+                    key={`val-${idx}`}
+                    style={[styles.chartValText, { position: 'absolute', left: p.x - 10, top: p.y - 15 }]}
+                  >
+                    {Math.round(p.val)}m
+                  </Text>
+                )}
+              </G>
+            );
+          })}
+        </Svg>
+      </View>
+    );
   };
 
-  return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar style="dark" />
-      <MotionScreen>
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        
-        {/* Header */}
-        <View style={styles.header}>
-          <Text style={styles.title}>Practice</Text>
-          <Text style={styles.subtitle}>Build confidence with short, useful phrases.</Text>
-        </View>
+  // ----------------------------------------------------
+  // CHART 2: WEEKLY ACTIVITY BARS
+  // ----------------------------------------------------
+  const renderWeeklyBars = () => {
+    const weeklyData = activeAnalytics.weekly_activity || {};
+    const maxVal = Math.max(...Object.values(weeklyData).map(v => Number(v) || 0), 5);
 
-        {/* Streak & Stats Row */}
-        <View style={styles.statsCard}>
-          <View style={styles.statBox}>
-            <Ionicons name="flame-outline" size={18} color={colors.textPrimary} />
-            <Text style={styles.statVal}>3 Days</Text>
-            <Text style={styles.statLabel}>Active Streak</Text>
-          </View>
-          <View style={styles.verticalDivider} />
-          <View style={styles.statBox}>
-            <Ionicons name="checkmark-circle-outline" size={18} color={colors.textPrimary} />
-            <Text style={styles.statVal}>{attempts.length}</Text>
-            <Text style={styles.statLabel}>Attempts</Text>
-          </View>
-          <View style={styles.verticalDivider} />
-          <View style={styles.statBox}>
-            <Ionicons name="analytics-outline" size={18} color={colors.textPrimary} />
-            <Text style={styles.statVal}>{averageScore}%</Text>
-            <Text style={styles.statLabel}>Avg Score</Text>
+    const weekdays = [
+      { key: '1', label: 'M' },
+      { key: '2', label: 'T' },
+      { key: '3', label: 'W' },
+      { key: '4', label: 'T' },
+      { key: '5', label: 'F' },
+      { key: '6', label: 'S' },
+      { key: '0', label: 'S' },
+    ];
+
+    const currentDOW = new Date().getDay().toString();
+
+    return (
+      <View style={styles.chartCard}>
+        <Text style={styles.chartTitle}>Daily Activity Intensity</Text>
+        <View style={styles.barChartContainer}>
+          {weekdays.map(day => {
+            const val = Number(weeklyData[day.key]) || 0;
+            const pct = (val / maxVal) * 100;
+            const isToday = currentDOW === day.key;
+
+            return (
+              <View key={day.key} style={styles.barColumn}>
+                <View style={styles.barTrack}>
+                  <View
+                    style={[
+                      styles.barFill,
+                      {
+                        height: `${pct}%`,
+                        backgroundColor: isToday ? colors.accentPurple : colors.primary,
+                      },
+                    ]}
+                  />
+                </View>
+                <Text style={[styles.barLabel, isToday && styles.barLabelActive]}>{day.label}</Text>
+                {val > 0 && <Text style={styles.barCount}>{val}</Text>}
+              </View>
+            );
+          })}
+        </View>
+      </View>
+    );
+  };
+
+  // ----------------------------------------------------
+  // CHART 3: TOOL-USAGE DONUT (Donut / Segmented Ring)
+  // ----------------------------------------------------
+  const renderToolUsageDonut = () => {
+    const usage = activeAnalytics.tool_usage || {};
+    const total = Object.values(usage).reduce((s: number, v: any) => s + (Number(v) || 0), 0);
+
+    const toolsConfig = [
+      { key: 'type', label: 'Type', color: colors.accentBlue || '#5B8DEF' },
+      { key: 'voice', label: 'Voice', color: colors.accentPurple || '#7C6CD0' },
+      { key: 'camera', label: 'Camera', color: colors.accentGreen || '#4D9A76' },
+      { key: 'conversation', label: 'Converse', color: colors.accentOrange || '#E2A05C' },
+    ];
+
+    if (total === 0) {
+      return (
+        <View style={styles.chartCard}>
+          <Text style={styles.chartTitle}>Tool Split</Text>
+          <View style={styles.chartEmptyContainer}>
+            <Text style={styles.chartEmptyText}>No tools usage logged.</Text>
           </View>
         </View>
+      );
+    }
 
-        {/* Weekly Streak Checklist */}
-        <View style={styles.streakCard}>
-          <Text style={styles.cardSectionTitle}>This week</Text>
-          <View style={styles.weekRow}>
-            {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, idx) => {
-              const active = idx < 3; // Mock active for Mon-Wed
+    const radius = 36;
+    const strokeWidth = 14;
+    const circumference = 2 * Math.PI * radius;
+    let accumulatedOffset = 0;
+
+    return (
+      <View style={styles.chartCard}>
+        <Text style={styles.chartTitle}>Tool Distribution</Text>
+        <View style={styles.donutLayout}>
+          <Svg width={120} height={120} style={styles.donutSvg}>
+            <G rotation="-90" origin="60, 60">
+              <Circle
+                cx="60"
+                cy="60"
+                r={radius}
+                fill="transparent"
+                stroke={colors.border}
+                strokeWidth={strokeWidth}
+              />
+              {toolsConfig.map((tool) => {
+                const val = Number(usage[tool.key as any]) || 0;
+                if (val === 0) return null;
+                const pct = val / total;
+                const strokeDash = pct * circumference;
+                const offset = circumference - strokeDash + accumulatedOffset;
+                accumulatedOffset -= strokeDash;
+
+                return (
+                  <Circle
+                    key={tool.key}
+                    cx="60"
+                    cy="60"
+                    r={radius}
+                    fill="transparent"
+                    stroke={tool.color}
+                    strokeWidth={strokeWidth}
+                    strokeDasharray={`${strokeDash} ${circumference - strokeDash}`}
+                    strokeDashoffset={offset}
+                  />
+                );
+              })}
+            </G>
+          </Svg>
+          <View style={styles.donutLegend}>
+            {toolsConfig.map((tool) => {
+              const val = Number(usage[tool.key as any]) || 0;
+              const pct = total > 0 ? Math.round((val / total) * 100) : 0;
               return (
-                <View key={idx} style={styles.dayCol}>
-                  <View style={[styles.dayCircle, active && styles.dayCircleActive]}>
-                    {active ? (
-                      <Ionicons name="checkmark" size={14} color={colors.textInverse} />
-                    ) : (
-                      <Text style={styles.dayCircleText}>{day}</Text>
-                    )}
-                  </View>
-                  <Text style={styles.dayLabel}>{day}</Text>
+                <View key={tool.key} style={styles.legendRow}>
+                  <View style={[styles.legendIndicator, { backgroundColor: tool.color }]} />
+                  <Text style={styles.legendText}>
+                    {tool.label} <Text style={styles.legendPct}>{pct}%</Text>
+                  </Text>
                 </View>
               );
             })}
           </View>
         </View>
+      </View>
+    );
+  };
 
-        {/* Daily Challenge Card */}
-        <View style={styles.dailyCard}>
-          <View style={styles.dailyBadge}>
-            <Ionicons name="trophy-outline" size={14} color={colors.textInverse} style={{ marginRight: 4 }} />
-            <Text style={styles.dailyBadgeText}>Today’s phrase</Text>
+  // ----------------------------------------------------
+  // CHART 4: LANGUAGE DISTRIBUTION
+  // ----------------------------------------------------
+  const renderLanguageDistribution = () => {
+    const dataMap = activeAnalytics.language_activity || {};
+    const total = Object.values(dataMap).reduce((s: number, v: any) => s + (Number(v) || 0), 0);
+    const sortedLanguages = Object.keys(dataMap).sort((a, b) => (dataMap[b] || 0) - (dataMap[a] || 0)).slice(0, 4);
+
+    if (sortedLanguages.length === 0) {
+      return (
+        <View style={styles.chartCard}>
+          <Text style={styles.chartTitle}>Target Languages</Text>
+          <View style={styles.chartEmptyContainer}>
+            <Text style={styles.chartEmptyText}>No translations logged.</Text>
           </View>
-          <Text style={styles.dailyPhraseText}>"{dailyChallenge.source}"</Text>
-          <Text style={styles.dailyTranslationText}>{dailyChallenge.target}</Text>
-          
-          <Pressable 
-            style={({ pressed }) => [styles.dailyActionBtn, pressed && styles.buttonPressed]}
-            onPress={() => handleStartPractice(dailyChallenge)}
-          >
-            <Text style={styles.dailyActionBtnText}>Practice Now</Text>
-            <Ionicons name="arrow-forward" size={16} color={colors.primary} style={{ marginLeft: 6 }} />
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.chartCard}>
+        <Text style={styles.chartTitle}>Top Practiced Languages</Text>
+        <View style={styles.langList}>
+          {sortedLanguages.map(lang => {
+            const count = Number(dataMap[lang]) || 0;
+            const pct = total > 0 ? (count / total) * 100 : 0;
+            const langName = getLanguageByCode(lang)?.name || lang.toUpperCase();
+
+            return (
+              <View key={lang} style={styles.langProgressRow}>
+                <View style={styles.langInfo}>
+                  <Text style={styles.langNameText}>{langName}</Text>
+                  <Text style={styles.langCountText}>{count} sessions</Text>
+                </View>
+                <View style={styles.langTrackBar}>
+                  <View style={[styles.langFillBar, { width: `${pct}%`, backgroundColor: colors.accentBlue }]} />
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      </View>
+    );
+  };
+
+  // ----------------------------------------------------
+  // CHART 5: PRACTICE HEAT MAP (Calendar Heatmap)
+  // ----------------------------------------------------
+  const renderPracticeHeatmap = () => {
+    const practiceDays = activeAnalytics.practice_time_by_day || {};
+    const totalBlocks = 12 * 7; // 12 weeks, 7 rows per week
+    const today = new Date();
+    
+    // Grid alignment: Start exactly 12 weeks ago, aligned to Monday
+    const startOffset = new Date(today);
+    startOffset.setDate(today.getDate() - totalBlocks + 1);
+
+    const squares: Array<{ date: string; value: number }> = [];
+    for (let i = 0; i < totalBlocks; i++) {
+      const current = new Date(startOffset);
+      current.setDate(startOffset.getDate() + i);
+      const dateStr = current.toISOString().split('T')[0];
+      squares.push({
+        date: dateStr,
+        value: practiceDays[dateStr] || 0,
+      });
+    }
+
+    const getIntensityColor = (val: number) => {
+      if (val === 0) return isDark ? '#1C1A1C' : '#ECEBF0';
+      if (val < 5) return isDark ? '#3D2F4B' : '#E6E2F7';
+      if (val < 15) return isDark ? '#5C3F75' : '#C7BDED';
+      if (val < 30) return isDark ? '#7E4FA5' : '#A796E2';
+      return isDark ? '#9B5CC5' : colors.accentPurple;
+    };
+
+    // Reshape matrix into 7 rows (Days of Week) x 12 columns (Weeks)
+    const rows = Array.from({ length: 7 }, () => [] as Array<{ date: string; value: number }>);
+    squares.forEach((sq, idx) => {
+      const rowIdx = idx % 7;
+      rows[rowIdx].push(sq);
+    });
+
+    return (
+      <View style={styles.chartCard}>
+        <Text style={styles.chartTitle}>Consistency Map (Last 12 Weeks)</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.heatmapScroll}>
+          <View style={styles.heatmapGrid}>
+            {rows.map((row, rowIdx) => (
+              <View key={rowIdx} style={styles.heatmapRow}>
+                {row.map((cell, colIdx) => (
+                  <View
+                    key={colIdx}
+                    style={[
+                      styles.heatmapSquare,
+                      { backgroundColor: getIntensityColor(cell.value) },
+                    ]}
+                  />
+                ))}
+              </View>
+            ))}
+          </View>
+        </ScrollView>
+        <View style={styles.heatmapLegend}>
+          <Text style={styles.heatmapLegendText}>Less</Text>
+          <View style={[styles.heatmapSquareLegend, { backgroundColor: isDark ? '#1C1A1C' : '#ECEBF0' }]} />
+          <View style={[styles.heatmapSquareLegend, { backgroundColor: isDark ? '#3D2F4B' : '#E6E2F7' }]} />
+          <View style={[styles.heatmapSquareLegend, { backgroundColor: isDark ? '#5C3F75' : '#C7BDED' }]} />
+          <View style={[styles.heatmapSquareLegend, { backgroundColor: isDark ? '#7E4FA5' : '#A796E2' }]} />
+          <View style={[styles.heatmapSquareLegend, { backgroundColor: isDark ? '#9B5CC5' : colors.accentPurple }]} />
+          <Text style={styles.heatmapLegendText}>More</Text>
+        </View>
+      </View>
+    );
+  };
+
+  // ----------------------------------------------------
+  // CHART 6: CONVERSATION PROGRESS
+  // ----------------------------------------------------
+  const renderConversationProgress = () => {
+    return (
+      <View style={styles.chartCard}>
+        <Text style={styles.chartTitle}>Conversation Drill Records</Text>
+        <View style={styles.convoMetrics}>
+          <View style={styles.convoMetricBox}>
+            <Text style={styles.convoMetricVal}>{totalConversations}</Text>
+            <Text style={styles.convoMetricLabel}>Total Dialogues</Text>
+          </View>
+          <View style={styles.convoMetricDivider} />
+          <View style={styles.convoMetricBox}>
+            <Text style={styles.convoMetricVal}>{Math.round(totalPracticeMin * 0.4)}m</Text>
+            <Text style={styles.convoMetricLabel}>Converse Time</Text>
+          </View>
+        </View>
+        <View style={styles.convoTimelinePlaceholder}>
+          <Ionicons name="chatbubbles-outline" size={24} color={colors.accentPurple} style={{ marginBottom: 6 }} />
+          <Text style={styles.convoTimelineText}>Steady progress on speech interaction.</Text>
+        </View>
+      </View>
+    );
+  };
+
+  // ----------------------------------------------------
+  // CHART 7: TRANSLATION MODE MIX
+  // ----------------------------------------------------
+  const renderTranslationModeMix = () => {
+    const usage = activeAnalytics.tool_usage || {};
+    const total = Object.values(usage).reduce((s: number, v: any) => s + (Number(v) || 0), 0);
+
+    const txtCount = Number(usage.type) || 0;
+    const voiceCount = Number(usage.voice) || 0;
+    const camCount = Number(usage.camera) || 0;
+    const convoCount = Number(usage.conversation) || 0;
+
+    const txtPct = total > 0 ? (txtCount / total) * 100 : 25;
+    const voicePct = total > 0 ? (voiceCount / total) * 100 : 25;
+    const camPct = total > 0 ? (camCount / total) * 100 : 25;
+    const convoPct = total > 0 ? (convoCount / total) * 100 : 25;
+
+    return (
+      <View style={styles.chartCard}>
+        <Text style={styles.chartTitle}>Input Channel Mix</Text>
+        <View style={styles.mixBarContainer}>
+          <View style={[styles.mixBarSegment, { width: `${txtPct}%`, backgroundColor: colors.accentBlue }]} />
+          <View style={[styles.mixBarSegment, { width: `${voicePct}%`, backgroundColor: colors.accentPurple }]} />
+          <View style={[styles.mixBarSegment, { width: `${camPct}%`, backgroundColor: colors.accentGreen }]} />
+          <View style={[styles.mixBarSegment, { width: `${convoPct}%`, backgroundColor: colors.accentOrange }]} />
+        </View>
+        <View style={styles.mixLegend}>
+          <View style={styles.mixLegendCol}>
+            <View style={[styles.mixLegendDot, { backgroundColor: colors.accentBlue }]} />
+            <Text style={styles.mixLegendLabel}>Text ({Math.round(txtPct)}%)</Text>
+          </View>
+          <View style={styles.mixLegendCol}>
+            <View style={[styles.mixLegendDot, { backgroundColor: colors.accentPurple }]} />
+            <Text style={styles.mixLegendLabel}>Voice ({Math.round(voicePct)}%)</Text>
+          </View>
+          <View style={styles.mixLegendCol}>
+            <View style={[styles.mixLegendDot, { backgroundColor: colors.accentGreen }]} />
+            <Text style={styles.mixLegendLabel}>Camera ({Math.round(camPct)}%)</Text>
+          </View>
+          <View style={styles.mixLegendCol}>
+            <View style={[styles.mixLegendDot, { backgroundColor: colors.accentOrange }]} />
+            <Text style={styles.mixLegendLabel}>Talk ({Math.round(convoPct)}%)</Text>
+          </View>
+        </View>
+      </View>
+    );
+  };
+
+  // ----------------------------------------------------
+  // CHART 8: SUMMARY RINGS (Circular Progress Rings)
+  // ----------------------------------------------------
+  const renderSummaryRings = () => {
+    // Inner/Concentric Rings representing Target Goals:
+    // Outer Ring: Practice Minutes (Goal = 30 mins)
+    // Middle Ring: Active Days (Goal = 5 days)
+    // Inner Ring: Translations/Attempts (Goal = 10 sessions)
+    const minutesGoal = 30;
+    const activeDaysGoal = 5;
+    const sessionsGoal = 10;
+
+    const minPct = Math.min(totalPracticeMin / minutesGoal, 1);
+    const dayPct = Math.min(activeDaysCount / activeDaysGoal, 1);
+    const sessPct = Math.min(totalTranslations / sessionsGoal, 1);
+
+    const center = 60;
+    const r1 = 44;
+    const r2 = 30;
+    const r3 = 16;
+    const strokeWidth = 10;
+
+    const c1 = 2 * Math.PI * r1;
+    const c2 = 2 * Math.PI * r2;
+    const c3 = 2 * Math.PI * r3;
+
+    return (
+      <View style={styles.chartCard}>
+        <Text style={styles.chartTitle}>Goal Ring Summary</Text>
+        <View style={styles.ringsContainer}>
+          <Svg width={120} height={120}>
+            <G rotation="-90" origin="60, 60">
+              {/* Outer Ring */}
+              <Circle cx={center} cy={center} r={r1} fill="none" stroke={colors.border} strokeWidth={strokeWidth} opacity={0.3} />
+              <Circle
+                cx={center}
+                cy={center}
+                r={r1}
+                fill="none"
+                stroke={colors.accentPurple}
+                strokeWidth={strokeWidth}
+                strokeDasharray={`${minPct * c1} ${c1}`}
+                strokeLinecap="round"
+              />
+
+              {/* Middle Ring */}
+              <Circle cx={center} cy={center} r={r2} fill="none" stroke={colors.border} strokeWidth={strokeWidth} opacity={0.3} />
+              <Circle
+                cx={center}
+                cy={center}
+                r={r2}
+                fill="none"
+                stroke={colors.accentBlue}
+                strokeWidth={strokeWidth}
+                strokeDasharray={`${dayPct * c2} ${c2}`}
+                strokeLinecap="round"
+              />
+
+              {/* Inner Ring */}
+              <Circle cx={center} cy={center} r={r3} fill="none" stroke={colors.border} strokeWidth={strokeWidth} opacity={0.3} />
+              <Circle
+                cx={center}
+                cy={center}
+                r={r3}
+                fill="none"
+                stroke={colors.accentGreen}
+                strokeWidth={strokeWidth}
+                strokeDasharray={`${sessPct * c3} ${c3}`}
+                strokeLinecap="round"
+              />
+            </G>
+          </Svg>
+          <View style={styles.ringsLegend}>
+            <View style={styles.ringLegendRow}>
+              <View style={[styles.ringLegendDot, { backgroundColor: colors.accentPurple }]} />
+              <View style={styles.ringLegendCopy}>
+                <Text style={styles.ringLegendTitle}>Practice Minutes</Text>
+                <Text style={styles.ringLegendStatus}>{totalPracticeMin}m / {minutesGoal}m</Text>
+              </View>
+            </View>
+            <View style={styles.ringLegendRow}>
+              <View style={[styles.ringLegendDot, { backgroundColor: colors.accentBlue }]} />
+              <View style={styles.ringLegendCopy}>
+                <Text style={styles.ringLegendTitle}>Active Days</Text>
+                <Text style={styles.ringLegendStatus}>{activeDaysCount}d / {activeDaysGoal}d</Text>
+              </View>
+            </View>
+            <View style={styles.ringLegendRow}>
+              <View style={[styles.ringLegendDot, { backgroundColor: colors.accentGreen }]} />
+              <View style={styles.ringLegendCopy}>
+                <Text style={styles.ringLegendTitle}>Daily Sessions</Text>
+                <Text style={styles.ringLegendStatus}>{totalTranslations} / {sessionsGoal}</Text>
+              </View>
+            </View>
+          </View>
+        </View>
+      </View>
+    );
+  };
+
+  return (
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <StatusBar style={isDark ? 'light' : 'dark'} />
+      <MotionScreen>
+        {/* Header */}
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.title}>Practice & Progress</Text>
+            <Text style={styles.subtitle}>Analyze learning habits and speech accuracy.</Text>
+          </View>
+          <Pressable style={styles.refreshBtn} onPress={handleRefresh}>
+            <Ionicons name="refresh" size={18} color={colors.textPrimary} />
           </Pressable>
         </View>
 
-        {/* Categories Tab Selectors */}
-        <View style={styles.categoryContainer}>
-          <View style={styles.categoryRow}>
-            {(['travel', 'business', 'saved'] as const).map((cat) => (
-              <Pressable
-                key={cat}
-                style={[styles.categoryTab, activeCategory === cat && styles.categoryTabActive]}
-                onPress={() => {
-                  Haptics.selectionAsync();
-                  setActiveCategory(cat);
-                }}
-              >
-                <Text style={[styles.categoryTabText, activeCategory === cat && styles.categoryTabTextActive]}>
-                  {cat.charAt(0).toUpperCase() + cat.slice(1)}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-        </View>
-
-        {/* Selected Category Drills */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Exercises</Text>
-          {phrasesToRender.map((phrase, idx) => (
-            <Pressable 
-              key={idx} 
-              style={styles.phrasePracticeCard}
-              onPress={() => handleStartPractice(phrase)}
+        {/* Time filters */}
+        <View style={styles.filtersRow}>
+          {([
+            { label: '7 Days', val: 7 },
+            { label: '30 Days', val: 30 },
+            { label: 'All Time', val: 0 },
+          ] as const).map(f => (
+            <Pressable
+              key={f.val}
+              style={[styles.filterChip, rangeDays === f.val && styles.filterChipActive]}
+              onPress={() => {
+                Haptics.selectionAsync();
+                setRangeDays(f.val);
+              }}
             >
-              <View style={styles.drillInfoCol}>
-                <Text style={styles.drillPromptText}>{phrase.source}</Text>
-                <Text style={styles.drillTranslatedText}>{phrase.target}</Text>
-              </View>
-              <View style={styles.drillArrowContainer}>
-                <Ionicons name="mic-outline" size={20} color={colors.primary} />
-              </View>
+              <Text style={[styles.filterChipText, rangeDays === f.val && styles.filterChipTextActive]}>
+                {f.label}
+              </Text>
             </Pressable>
           ))}
-          {phrasesToRender.length === 0 && (
-            <View style={styles.emptyDrillCard}>
-              <Ionicons name="bookmark-outline" size={32} color={colors.disabled} style={{ marginBottom: 8 }} />
-              <Text style={styles.emptyDrillText}>
-                No phrases found in this category. Go to Home or History to bookmark translations.
-              </Text>
+        </View>
+
+        <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+          {/* Top Metrics Grid */}
+          <View style={styles.metricsGrid}>
+            <View style={styles.metricCard}>
+              <Ionicons name="time-outline" size={18} color={colors.accentPurple} style={{ marginBottom: 4 }} />
+              <Text style={styles.metricVal}>{totalPracticeMin}m</Text>
+              <Text style={styles.metricLabel}>Practice Time</Text>
+            </View>
+            <View style={styles.metricCard}>
+              <Ionicons name="flame-outline" size={18} color={colors.accentOrange} style={{ marginBottom: 4 }} />
+              <Text style={styles.metricVal}>{streakDaysCount}d</Text>
+              <Text style={styles.metricLabel}>Streak Days</Text>
+            </View>
+            <View style={styles.metricCard}>
+              <Ionicons name="calendar-outline" size={18} color={colors.accentBlue} style={{ marginBottom: 4 }} />
+              <Text style={styles.metricVal}>{activeDaysCount}d</Text>
+              <Text style={styles.metricLabel}>Active Days</Text>
+            </View>
+            <View style={styles.metricCard}>
+              <Ionicons name="chatbubbles-outline" size={18} color={colors.accentGreen} style={{ marginBottom: 4 }} />
+              <Text style={styles.metricVal}>{totalConversations}</Text>
+              <Text style={styles.metricLabel}>Dialogues</Text>
+            </View>
+          </View>
+
+          {/* Core Analytics Cards */}
+          <View style={styles.metricsGridTwo}>
+            <View style={styles.metricCardTwo}>
+              <Text style={styles.metricSubVal}>{mostUsedToolName}</Text>
+              <Text style={styles.metricSubLabel}>Most Used Tool</Text>
+            </View>
+            <View style={styles.metricCardTwo}>
+              <Text style={styles.metricSubVal}>{mostUsedLanguage}</Text>
+              <Text style={styles.metricSubLabel}>Top Target Language</Text>
+            </View>
+          </View>
+
+          {/* Loading Indicator */}
+          {analyticsLoading ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="small" color={colors.accentPurple} />
+            </View>
+          ) : (
+            <View style={styles.chartsWrapper}>
+              {/* Concentric rings */}
+              {renderSummaryRings()}
+
+              {/* Heatmap */}
+              {renderPracticeHeatmap()}
+
+              {/* Line chart trend */}
+              {renderActivityTrend()}
+
+              {/* Weekly bar count */}
+              {renderWeeklyBars()}
+
+              {/* Input channel mix */}
+              {renderTranslationModeMix()}
+
+              {/* Donut tool split */}
+              {renderToolUsageDonut()}
+
+              {/* Top target language bar list */}
+              {renderLanguageDistribution()}
+
+              {/* Dialogue logs progress */}
+              {renderConversationProgress()}
             </View>
           )}
-        </View>
 
-        {/* Progress Charts (Simulated Bars) */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Progress</Text>
-          <View style={styles.analyticsCard}>
-            <Text style={styles.analyticsTitle}>Weekly Pronunciation Trend</Text>
-            <View style={styles.chartContainer}>
-              {[
-                { label: 'Mon', score: 85 },
-                { label: 'Tue', score: 92 },
-                { label: 'Wed', score: 90 },
-                { label: 'Thu', score: 95 },
-                { label: 'Fri', score: 0 },
-                { label: 'Sat', score: 0 },
-                { label: 'Sun', score: 0 },
-              ].map((day, i) => (
-                <View key={i} style={styles.chartColumn}>
-                  <View style={styles.chartBarWrapper}>
-                    <View style={[styles.chartBar, { height: `${day.score}%`, backgroundColor: colors.primary }]} />
+          {/* Section: Saved Phrases drill */}
+          <View style={styles.drillSection}>
+            <Text style={styles.drillSectionTitle}>Saved Phrases for Practice</Text>
+            {bookmarks.length === 0 ? (
+              <View style={styles.emptyDrillCard}>
+                <Ionicons name="bookmark-outline" size={24} color={colors.textSubtle} style={{ marginBottom: 6 }} />
+                <Text style={styles.emptyDrillText}>
+                  Bookmarks list is empty. Tap the bookmark icon on any translated phrase to practice here.
+                </Text>
+              </View>
+            ) : (
+              bookmarks.map((b: any) => (
+                <View key={b.id} style={styles.drillListItem}>
+                  <View style={styles.drillListInfo}>
+                    <Text style={styles.drillListSource}>{b.source_text}</Text>
+                    <Text style={styles.drillListTranslation}>{b.translated_text}</Text>
                   </View>
-                  <Text style={styles.chartBarLabel}>{day.label}</Text>
-                  {day.score > 0 && <Text style={styles.chartBarScore}>{day.score}%</Text>}
+                  <Pressable
+                    style={styles.drillListAction}
+                    onPress={() => {
+                      Haptics.selectionAsync();
+                      Alert.alert('Bookmark Ref', `Target: ${getLanguageByCode(b.target_language)?.name || b.target_language}`);
+                    }}
+                  >
+                    <Ionicons name="bookmark" size={16} color={colors.accentPurple} />
+                  </Pressable>
                 </View>
-              ))}
-            </View>
-          </View>
-        </View>
-
-      </ScrollView>
-      </MotionScreen>
-
-      {/* QUIZ INTERACTIVE DIALOG MODAL */}
-      <Modal
-        visible={quizModalVisible}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setQuizModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.quizModalContainer}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.quizModalTitle}>Pronunciation Quiz</Text>
-              <Pressable onPress={() => setQuizModalVisible(false)} style={styles.modalCloseBtn}>
-                <Ionicons name="close" size={24} color={colors.textPrimary} />
-              </Pressable>
-            </View>
-
-            {selectedPhrase && (
-              <ScrollView style={styles.quizScroll} showsVerticalScrollIndicator={false}>
-                <View style={styles.quizContentCard}>
-                  <Text style={styles.quizPromptLabel}>REPEAT THIS PHRASE:</Text>
-                  <Text style={styles.quizTargetPhrase}>"{selectedPhrase.source}"</Text>
-                  <Text style={styles.quizTargetTranslation}>{selectedPhrase.target}</Text>
-                </View>
-
-                {/* Session States */}
-                {sessionProgress === 'idle' && (
-                  <View style={styles.sessionStatusContainer}>
-                    <Ionicons name="volume-medium-outline" size={48} color={colors.accentPurple} style={{ marginBottom: 12 }} />
-                    <Text style={styles.sessionStatusText}>Listen carefully, then press recording button below to read the phrase aloud.</Text>
-                  </View>
-                )}
-
-                {sessionProgress === 'recording' && (
-                  <View style={styles.sessionStatusContainer}>
-                    <Text style={styles.sessionStatusTextActive}>Listening... {recordingSeconds}s</Text>
-                    <View style={styles.waveformRow}>
-                      {simulatedVolume.map((vol, i) => (
-                        <View key={i} style={[styles.waveBar, { height: vol, backgroundColor: colors.error }]} />
-                      ))}
-                    </View>
-                  </View>
-                )}
-
-                {sessionProgress === 'processing' && (
-                  <View style={styles.sessionStatusContainer}>
-                    <ActivityIndicator size="large" color={colors.primary} style={{ marginBottom: 12 }} />
-                    <Text style={styles.sessionStatusText}>Analyzing accent accuracy...</Text>
-                  </View>
-                )}
-
-                {sessionProgress === 'result' && (
-                  <View style={styles.resultContainer}>
-                    {/* Score Badge */}
-                    <View style={styles.scoreRow}>
-                      <View style={[
-                        styles.accuracyCircle,
-                        { borderColor: accuracyScore >= 90 ? colors.success : colors.warning }
-                      ]}>
-                        <Text style={[
-                          styles.accuracyScoreNum,
-                          { color: accuracyScore >= 90 ? colors.success : colors.warning }
-                        ]}>
-                          {accuracyScore}%
-                        </Text>
-                        <Text style={styles.accuracyCircleLabel}>ACCURACY</Text>
-                      </View>
-                      <View style={styles.feedbackCol}>
-                        <Text style={styles.feedbackHeading}>AI Feedback</Text>
-                        <Text style={styles.feedbackText}>{feedback}</Text>
-                      </View>
-                    </View>
-
-                    {/* Recorded Text Difference Display */}
-                    <View style={styles.diffCard}>
-                      <Text style={styles.diffCardTitle}>SPEECH WORD COMPARISON</Text>
-                      <View style={styles.diffWordsRow}>
-                        {wordDiffs.map((item, idx) => {
-                          let itemColor: string = colors.textPrimary;
-                          let textDecor: 'none' | 'line-through' = 'none';
-
-                          if (item.status === 'correct') {
-                            itemColor = colors.success;
-                          } else if (item.status === 'missing') {
-                            itemColor = colors.error;
-                            textDecor = 'line-through';
-                          } else if (item.status === 'extra') {
-                            itemColor = colors.accentOrange;
-                          }
-
-                          return (
-                            <Text 
-                              key={idx} 
-                              style={[
-                                styles.diffWordText,
-                                { color: itemColor, textDecorationLine: textDecor }
-                              ]}
-                            >
-                              {item.word}{' '}
-                            </Text>
-                          );
-                        })}
-                      </View>
-                      <Text style={styles.diffHelperText}>
-                        <Text style={{ color: colors.success }}>■ Correct</Text>  |  
-                        <Text style={{ color: colors.error, textDecorationLine: 'line-through' }}> ■ Missing</Text>  |  
-                        <Text style={{ color: colors.accentOrange }}> ■ Inserted</Text>
-                      </Text>
-                    </View>
-                  </View>
-                )}
-
-                {/* Footer buttons inside Modal */}
-                <View style={styles.quizControlsRow}>
-                  {sessionProgress === 'result' ? (
-                    <Pressable 
-                      style={[styles.quizPrimaryActionBtn, { backgroundColor: colors.primary }]}
-                      onPress={() => handleStartPractice(selectedPhrase)}
-                    >
-                      <Ionicons name="refresh" size={18} color={colors.textInverse} style={{ marginRight: 6 }} />
-                      <Text style={styles.quizPrimaryActionBtnText}>Try Again</Text>
-                    </Pressable>
-                  ) : (
-                    <Pressable
-                      style={[
-                        styles.quizMicBtn,
-                        isRecording && styles.quizMicBtnActive
-                      ]}
-                      onPress={handleToggleRecord}
-                      disabled={sessionProgress === 'processing'}
-                    >
-                      <Ionicons 
-                        name={isRecording ? 'stop' : 'mic'} 
-                        size={32} 
-                        color={colors.textInverse} 
-                      />
-                    </Pressable>
-                  )}
-                </View>
-              </ScrollView>
+              ))
             )}
           </View>
-        </View>
-      </Modal>
+
+          {/* Section: Recent Practice attempts */}
+          <View style={[styles.drillSection, { marginBottom: 30 }]}>
+            <Text style={styles.drillSectionTitle}>Recent Practice Log</Text>
+            {attempts.length === 0 ? (
+              <View style={styles.emptyDrillCard}>
+                <Ionicons name="recording-outline" size={24} color={colors.textSubtle} style={{ marginBottom: 6 }} />
+                <Text style={styles.emptyDrillText}>No spoken practice attempts logged yet.</Text>
+              </View>
+            ) : (
+              attempts.map((item: any) => (
+                <View key={item.id} style={styles.attemptCard}>
+                  <View style={styles.attemptHeader}>
+                    <Text style={styles.attemptDate}>
+                      {new Date(item.created_at).toLocaleDateString()}
+                    </Text>
+                    <View style={styles.attemptBadge}>
+                      <Text style={styles.attemptBadgeText}>{item.accuracy_score}% Correct</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.attemptPrompt}>Prompt: "{item.phrase_source}"</Text>
+                  <Text style={styles.attemptText}>Speech: "{item.recognized_text}"</Text>
+                  <Text style={styles.attemptFeedback}>{item.feedback}</Text>
+                </View>
+              ))
+            )}
+          </View>
+        </ScrollView>
+      </MotionScreen>
     </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  scrollContent: {
-    paddingHorizontal: 24,
-    paddingTop: 20,
-    paddingBottom: 110,
-  },
-  header: {
-    marginBottom: 20,
-  },
-  title: {
-    ...typography.heading1,
-    color: colors.textPrimary,
-    marginBottom: 8,
-  },
-  subtitle: {
-    fontSize: 14,
-    fontFamily: typography.body.fontFamily,
-    color: colors.textSecondary,
-    lineHeight: 20,
-  },
-  statsCard: {
-    flexDirection: 'row',
-    backgroundColor: colors.surfaceSoft,
-    borderWidth: 0,
-    borderRadius: 18,
-    paddingVertical: 14,
-    marginBottom: 20,
-  },
-  statBox: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  statVal: {
-    fontSize: 18,
-    fontFamily: typography.bodySemibold.fontFamily,
-    fontWeight: '700',
-    color: colors.textPrimary,
-    marginTop: 6,
-    marginBottom: 2,
-  },
-  statLabel: {
-    fontSize: 11,
-    fontFamily: typography.caption.fontFamily,
-    color: colors.textMuted,
-  },
-  verticalDivider: {
-    width: 1,
-    backgroundColor: colors.border,
-  },
-  streakCard: {
-    backgroundColor: colors.backgroundSoft,
-    borderRadius: 18,
-    borderWidth: 0,
-    padding: spacing.md,
-    marginBottom: 20,
-  },
-  cardSectionTitle: {
-    ...typography.captionMedium,
-    color: colors.textMuted,
-    marginBottom: 12,
-  },
-  weekRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  dayCol: {
-    alignItems: 'center',
-  },
-  dayCircle: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: colors.backgroundMuted,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  dayCircleActive: {
-    backgroundColor: colors.primary,
-  },
-  dayCircleText: {
-    ...typography.smallMedium,
-    color: colors.textMuted,
-  },
-  dayLabel: {
-    ...typography.small,
-    color: colors.textSecondary,
-  },
-  dailyCard: {
-    backgroundColor: colors.surfaceSelected,
-    borderRadius: 20,
-    padding: 20,
-    marginBottom: 24,
-  },
-  dailyBadge: {
-    alignSelf: 'flex-start',
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-    marginBottom: 14,
-  },
-  dailyBadgeText: {
-    ...typography.smallMedium,
-    color: colors.textInverse,
-    fontSize: 11,
-  },
-  dailyPhraseText: {
-    ...typography.heading3,
-    color: colors.textInverse,
-    lineHeight: 28,
-  },
-  dailyTranslationText: {
-    ...typography.body,
-    color: colors.textSubtle,
-    marginTop: 4,
-    marginBottom: 18,
-  },
-  dailyActionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.background,
-    borderRadius: 22,
-    paddingVertical: 12,
-    alignSelf: 'flex-start',
-    paddingHorizontal: 16,
-  },
-  dailyActionBtnText: {
-    ...typography.buttonSmall,
-    color: colors.primary,
-  },
-  buttonPressed: {
-    opacity: 0.85,
-    transform: [{ scale: 0.98 }],
-  },
-  categoryContainer: {
-    marginBottom: 20,
-  },
-  categoryRow: {
-    flexDirection: 'row',
-    backgroundColor: colors.backgroundSoft,
-    padding: 4,
-    borderRadius: 12,
-    borderWidth: 0,
-  },
-  categoryTab: {
-    flex: 1,
-    paddingVertical: 10,
-    alignItems: 'center',
-    borderRadius: 10,
-  },
-  categoryTabActive: {
-    backgroundColor: colors.background,
-    ...shadows.sm,
-  },
-  categoryTabText: {
-    ...typography.captionMedium,
-    color: colors.textSecondary,
-  },
-  categoryTabTextActive: {
-    color: colors.textPrimary,
-    fontWeight: '700',
-  },
-  section: {
-    marginBottom: 24,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontFamily: typography.heading4.fontFamily,
-    fontWeight: typography.heading4.fontWeight,
-    color: colors.textPrimary,
-    marginBottom: 12,
-  },
-  phrasePracticeCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: colors.backgroundSoft,
-    borderRadius: 16,
-    borderWidth: 0,
-    padding: 16,
-    marginBottom: 8,
-  },
-  drillInfoCol: {
-    flex: 1,
-    marginRight: 12,
-  },
-  drillPromptText: {
-    ...typography.bodySemibold,
-    color: colors.textPrimary,
-    marginBottom: 4,
-  },
-  drillTranslatedText: {
-    ...typography.caption,
-    color: colors.textMuted,
-  },
-  drillArrowContainer: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: colors.backgroundSoft,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  emptyDrillCard: {
-    backgroundColor: colors.surfaceSoft,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  emptyDrillText: {
-    ...typography.caption,
-    color: colors.textMuted,
-    textAlign: 'center',
-    lineHeight: 18,
-  },
-  analyticsCard: {
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 16,
-    ...shadows.sm,
-  },
-  analyticsTitle: {
-    ...typography.captionMedium,
-    color: colors.textSecondary,
-    marginBottom: 16,
-  },
-  chartContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-end',
-    height: 120,
-    paddingTop: 10,
-  },
-  chartColumn: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  chartBarWrapper: {
-    width: 12,
-    height: 80,
-    backgroundColor: colors.backgroundMuted,
-    borderRadius: 6,
-    overflow: 'hidden',
-    justifyContent: 'flex-end',
-  },
-  chartBar: {
-    width: '100%',
-    borderRadius: 6,
-  },
-  chartBarLabel: {
-    ...typography.small,
-    fontSize: 9,
-    color: colors.textMuted,
-    marginTop: 6,
-  },
-  chartBarScore: {
-    ...typography.small,
-    fontSize: 8,
-    color: colors.textPrimary,
-    position: 'absolute',
-    top: -12,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: colors.overlay,
-    justifyContent: 'flex-end',
-  },
-  quizModalContainer: {
-    backgroundColor: colors.background,
-    borderTopLeftRadius: layout.cardRadius,
-    borderTopRightRadius: layout.cardRadius,
-    height: '80%',
-    padding: spacing.lg,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    borderBottomWidth: 1,
-    borderColor: colors.border,
-    paddingBottom: spacing.sm,
-    marginBottom: spacing.sm,
-  },
-  quizModalTitle: {
-    ...typography.heading3,
-    color: colors.textPrimary,
-  },
-  modalCloseBtn: {
-    padding: 4,
-  },
-  quizScroll: {
-    flex: 1,
-  },
-  quizContentCard: {
-    backgroundColor: colors.surfaceSoft,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 20,
-    marginBottom: 20,
-  },
-  quizPromptLabel: {
-    ...typography.smallMedium,
-    color: colors.accentPurple,
-    letterSpacing: 0.5,
-    marginBottom: 8,
-  },
-  quizTargetPhrase: {
-    ...typography.heading2,
-    color: colors.textPrimary,
-    lineHeight: 30,
-  },
-  quizTargetTranslation: {
-    ...typography.body,
-    color: colors.textSecondary,
-    marginTop: 6,
-  },
-  sessionStatusContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 32,
-    paddingHorizontal: 20,
-  },
-  sessionStatusText: {
-    ...typography.body,
-    color: colors.textMuted,
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-  sessionStatusTextActive: {
-    ...typography.bodySemibold,
-    color: colors.error,
-    marginBottom: 16,
-  },
-  waveformRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    height: 60,
-  },
-  waveBar: {
-    width: 6,
-    marginHorizontal: 3,
-    borderRadius: 3,
-  },
-  resultContainer: {
-    marginTop: 10,
-  },
-  scoreRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
-    ...shadows.sm,
-  },
-  accuracyCircle: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    borderWidth: 6,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  accuracyScoreNum: {
-    fontSize: 22,
-    fontWeight: '700',
-  },
-  accuracyCircleLabel: {
-    fontSize: 7,
-    fontWeight: '600',
-    color: colors.textMuted,
-    letterSpacing: 0.5,
-    marginTop: 2,
-  },
-  feedbackCol: {
-    flex: 1,
-  },
-  feedbackHeading: {
-    ...typography.captionMedium,
-    color: colors.textPrimary,
-    fontWeight: '700',
-    marginBottom: 4,
-  },
-  feedbackText: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    lineHeight: 16,
-  },
-  diffCard: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 20,
-    ...shadows.sm,
-  },
-  diffCardTitle: {
-    ...typography.smallMedium,
-    color: colors.textMuted,
-    letterSpacing: 0.5,
-    marginBottom: 12,
-  },
-  diffWordsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginBottom: 12,
-  },
-  diffWordText: {
-    ...typography.bodySemibold,
-    fontSize: 18,
-    lineHeight: 26,
-  },
-  diffHelperText: {
-    ...typography.small,
-    fontSize: 9,
-    color: colors.textSubtle,
-    borderTopWidth: 0.5,
-    borderColor: colors.border,
-    paddingTop: 8,
-  },
-  quizControlsRow: {
-    alignItems: 'center',
-    marginVertical: 20,
-  },
-  quizMicBtn: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: colors.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-    ...shadows.lg,
-  },
-  quizMicBtnActive: {
-    backgroundColor: colors.error,
-    transform: [{ scale: 1.1 }],
-  },
-  quizPrimaryActionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 48,
-    borderRadius: 24,
-    paddingHorizontal: 24,
-    ...shadows.md,
-  },
-  quizPrimaryActionBtnText: {
-    ...typography.buttonSmall,
-    color: colors.textInverse,
-  },
-});
+const createStyles = (colors: any) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: colors.background,
+    },
+    scrollContent: {
+      paddingHorizontal: layout.pageMargin,
+      paddingTop: spacing.xs,
+      paddingBottom: layout.tabBarHeight + spacing.xl,
+    },
+    header: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: layout.pageMargin,
+      paddingTop: spacing.md,
+      paddingBottom: spacing.sm,
+    },
+    title: {
+      ...typography.heading2,
+      color: colors.textPrimary,
+    },
+    subtitle: {
+      ...typography.body,
+      color: colors.textSecondary,
+      marginTop: 2,
+    },
+    refreshBtn: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: colors.backgroundSoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    filtersRow: {
+      flexDirection: 'row',
+      paddingHorizontal: layout.pageMargin,
+      gap: spacing.xs,
+      marginBottom: spacing.md,
+    },
+    filterChip: {
+      paddingVertical: 6,
+      paddingHorizontal: 12,
+      borderRadius: 16,
+      backgroundColor: colors.backgroundSoft,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    filterChipActive: {
+      backgroundColor: colors.primary,
+      borderColor: colors.primary,
+    },
+    filterChipText: {
+      fontSize: 13,
+      fontWeight: '600',
+      color: colors.textSecondary,
+    },
+    filterChipTextActive: {
+      color: colors.textInverse,
+    },
+    metricsGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.xs,
+      marginBottom: spacing.xs,
+    },
+    metricCard: {
+      flex: 1,
+      minWidth: '45%',
+      backgroundColor: colors.backgroundSoft,
+      borderRadius: layout.cardRadius - 4,
+      padding: spacing.md,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    metricVal: {
+      fontSize: 22,
+      fontWeight: '800',
+      color: colors.textPrimary,
+      marginVertical: 2,
+    },
+    metricLabel: {
+      fontSize: 12,
+      color: colors.textSecondary,
+      fontWeight: '500',
+    },
+    metricsGridTwo: {
+      flexDirection: 'row',
+      gap: spacing.xs,
+      marginBottom: spacing.md,
+    },
+    metricCardTwo: {
+      flex: 1,
+      backgroundColor: colors.backgroundSoft,
+      borderRadius: layout.cardRadius - 4,
+      padding: spacing.md,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    metricSubVal: {
+      fontSize: 15,
+      fontWeight: '700',
+      color: colors.textPrimary,
+      marginBottom: 2,
+    },
+    metricSubLabel: {
+      fontSize: 12,
+      color: colors.textSecondary,
+    },
+    loadingContainer: {
+      paddingVertical: 40,
+      alignItems: 'center',
+    },
+    chartsWrapper: {
+      gap: spacing.md,
+    },
+    chartCard: {
+      backgroundColor: colors.backgroundSoft,
+      borderRadius: layout.cardRadius,
+      padding: spacing.md,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    chartTitle: {
+      fontSize: 14,
+      fontWeight: '700',
+      color: colors.textPrimary,
+      marginBottom: spacing.md,
+    },
+    chartEmptyContainer: {
+      height: 100,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    chartEmptyText: {
+      fontSize: 13,
+      color: colors.textSubtle,
+    },
+    chartAxisText: {
+      fontSize: 10,
+      fontWeight: '500',
+      color: colors.textSubtle,
+    },
+    chartValText: {
+      fontSize: 9,
+      fontWeight: '700',
+      color: colors.textSecondary,
+    },
+    barChartContainer: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'flex-end',
+      height: 140,
+      paddingTop: 10,
+    },
+    barColumn: {
+      alignItems: 'center',
+      width: '12%',
+    },
+    barTrack: {
+      height: 100,
+      width: 12,
+      backgroundColor: colors.backgroundMuted || '#ECEBF0',
+      borderRadius: 6,
+      justifyContent: 'flex-end',
+      overflow: 'hidden',
+    },
+    barFill: {
+      width: '100%',
+      borderRadius: 6,
+    },
+    barLabel: {
+      fontSize: 11,
+      fontWeight: '600',
+      color: colors.textSubtle,
+      marginTop: 6,
+    },
+    barLabelActive: {
+      color: colors.accentPurple,
+      fontWeight: '800',
+    },
+    barCount: {
+      fontSize: 9,
+      fontWeight: '700',
+      color: colors.textSecondary,
+      marginTop: 2,
+    },
+    donutLayout: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-around',
+    },
+    donutSvg: {
+      alignSelf: 'center',
+    },
+    donutLegend: {
+      gap: 6,
+    },
+    legendRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    legendIndicator: {
+      width: 8,
+      height: 8,
+      borderRadius: 4,
+    },
+    legendText: {
+      fontSize: 12,
+      fontWeight: '500',
+      color: colors.textSecondary,
+    },
+    legendPct: {
+      fontWeight: '700',
+      color: colors.textPrimary,
+    },
+    langList: {
+      gap: spacing.sm,
+    },
+    langProgressRow: {
+      gap: 4,
+    },
+    langInfo: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+    },
+    langNameText: {
+      fontSize: 13,
+      fontWeight: '600',
+      color: colors.textPrimary,
+    },
+    langCountText: {
+      fontSize: 11,
+      color: colors.textSecondary,
+    },
+    langTrackBar: {
+      height: 6,
+      backgroundColor: colors.border,
+      borderRadius: 3,
+      overflow: 'hidden',
+    },
+    langFillBar: {
+      height: '100%',
+      borderRadius: 3,
+    },
+    heatmapScroll: {
+      paddingBottom: 4,
+    },
+    heatmapGrid: {
+      gap: 3,
+    },
+    heatmapRow: {
+      flexDirection: 'row',
+      gap: 3,
+    },
+    heatmapSquare: {
+      width: 11,
+      height: 11,
+      borderRadius: 2,
+    },
+    heatmapSquareLegend: {
+      width: 10,
+      height: 10,
+      borderRadius: 2,
+    },
+    heatmapLegend: {
+      flexDirection: 'row',
+      justifyContent: 'flex-end',
+      alignItems: 'center',
+      gap: 4,
+      marginTop: spacing.sm,
+    },
+    heatmapLegendText: {
+      fontSize: 11,
+      color: colors.textSubtle,
+    },
+    convoMetrics: {
+      flexDirection: 'row',
+      justifyContent: 'space-around',
+      marginBottom: spacing.md,
+    },
+    convoMetricBox: {
+      alignItems: 'center',
+    },
+    convoMetricVal: {
+      fontSize: 20,
+      fontWeight: '800',
+      color: colors.textPrimary,
+    },
+    convoMetricLabel: {
+      fontSize: 11,
+      color: colors.textSecondary,
+    },
+    convoMetricDivider: {
+      width: 1,
+      height: 30,
+      backgroundColor: colors.border,
+      alignSelf: 'center',
+    },
+    convoTimelinePlaceholder: {
+      backgroundColor: colors.background,
+      borderRadius: 12,
+      padding: spacing.md,
+      alignItems: 'center',
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    convoTimelineText: {
+      fontSize: 12,
+      color: colors.textSecondary,
+      textAlign: 'center',
+    },
+    mixBarContainer: {
+      height: 14,
+      borderRadius: 7,
+      flexDirection: 'row',
+      overflow: 'hidden',
+      marginBottom: spacing.md,
+    },
+    mixBarSegment: {
+      height: '100%',
+    },
+    mixLegend: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      justifyContent: 'space-between',
+      gap: 8,
+    },
+    mixLegendCol: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    mixLegendDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+    },
+    mixLegendLabel: {
+      fontSize: 11,
+      color: colors.textSecondary,
+      fontWeight: '500',
+    },
+    ringsContainer: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-around',
+    },
+    ringsLegend: {
+      gap: spacing.sm,
+    },
+    ringLegendRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    ringLegendDot: {
+      width: 8,
+      height: 8,
+      borderRadius: 4,
+    },
+    ringLegendCopy: {
+      gap: 1,
+    },
+    ringLegendTitle: {
+      fontSize: 11,
+      fontWeight: '600',
+      color: colors.textSecondary,
+    },
+    ringLegendStatus: {
+      fontSize: 12,
+      fontWeight: '700',
+      color: colors.textPrimary,
+    },
+    drillSection: {
+      marginTop: spacing.xl,
+    },
+    drillSectionTitle: {
+      fontSize: 15,
+      fontWeight: '700',
+      color: colors.textPrimary,
+      marginBottom: spacing.md,
+    },
+    emptyDrillCard: {
+      backgroundColor: colors.backgroundSoft,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: layout.cardRadius - 4,
+      padding: 20,
+      alignItems: 'center',
+    },
+    emptyDrillText: {
+      fontSize: 12,
+      color: colors.textSecondary,
+      textAlign: 'center',
+      lineHeight: 16,
+    },
+    drillListItem: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      backgroundColor: colors.backgroundSoft,
+      padding: spacing.md,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: colors.border,
+      marginBottom: spacing.xs,
+    },
+    drillListInfo: {
+      flex: 1,
+      marginRight: 10,
+    },
+    drillListSource: {
+      fontSize: 13,
+      fontWeight: '600',
+      color: colors.textPrimary,
+    },
+    drillListTranslation: {
+      fontSize: 12,
+      color: colors.textSecondary,
+      marginTop: 2,
+    },
+    drillListAction: {
+      padding: 8,
+    },
+    attemptCard: {
+      backgroundColor: colors.backgroundSoft,
+      borderRadius: layout.cardRadius - 4,
+      borderWidth: 1,
+      borderColor: colors.border,
+      padding: spacing.md,
+      marginBottom: spacing.xs,
+    },
+    attemptHeader: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: 6,
+    },
+    attemptDate: {
+      fontSize: 11,
+      color: colors.textSubtle,
+      fontWeight: '500',
+    },
+    attemptBadge: {
+      backgroundColor: colors.successLight,
+      paddingHorizontal: 8,
+      paddingVertical: 2,
+      borderRadius: 8,
+    },
+    attemptBadgeText: {
+      fontSize: 10,
+      fontWeight: '700',
+      color: colors.success,
+    },
+    attemptPrompt: {
+      fontSize: 13,
+      fontWeight: '700',
+      color: colors.textPrimary,
+      marginBottom: 2,
+    },
+    attemptText: {
+      fontSize: 12,
+      color: colors.textSecondary,
+      marginBottom: 4,
+    },
+    attemptFeedback: {
+      fontSize: 11,
+      fontStyle: 'italic',
+      color: colors.accentPurple,
+    },
+  });
