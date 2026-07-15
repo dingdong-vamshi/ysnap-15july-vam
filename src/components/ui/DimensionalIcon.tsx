@@ -68,7 +68,7 @@ export const DimensionalIcon: React.FC<DimensionalIconProps> = ({
   // Clone icon to enforce monochrome colors
   const renderIcon = () => {
     if (React.isValidElement(icon)) {
-      const iconColor = isSelected ? '#FFFFFF' : '#000000';
+      const iconColor = isSelected ? '#000000' : '#FFFFFF';
       return React.cloneElement(icon as React.ReactElement<any>, {
         color: iconColor,
       });
@@ -83,7 +83,7 @@ export const DimensionalIcon: React.FC<DimensionalIconProps> = ({
         <View 
           style={[
             styles.topSheen, 
-            { backgroundColor: isSelected ? 'rgba(255, 255, 255, 0.15)' : 'rgba(255, 255, 255, 0.65)' }
+            { backgroundColor: isSelected ? 'rgba(255, 255, 255, 0.65)' : 'rgba(255, 255, 255, 0.15)' }
           ]} 
         />
       )}
@@ -148,14 +148,14 @@ const styles = StyleSheet.create({
     zIndex: 1,
   },
   unselected: {
+    backgroundColor: '#1E1E20',
+    borderColor: '#2D2D30',
+    borderBottomColor: '#0F0F10',
+  },
+  selected: {
     backgroundColor: '#FAFAFA',
     borderColor: '#E4E4E7',
     borderBottomColor: '#A1A1AA',
-  },
-  selected: {
-    backgroundColor: '#171717',
-    borderColor: '#2E2E2E',
-    borderBottomColor: '#050505',
   },
   pressed: {
     transform: [{ translateY: 2 }, { scale: 0.97 }],
