@@ -122,3 +122,8 @@ export function useTheme() {
   }
   return context;
 }
+
+export function useThemeStyles<T>(createStyles: (colors: any) => T): T {
+  const { isDark } = useTheme();
+  return React.useMemo(() => createStyles(colors), [isDark]);
+}

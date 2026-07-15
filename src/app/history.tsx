@@ -7,6 +7,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import { colors } from '../constants/colors';
+import { useTheme, useThemeStyles } from '../contexts/ThemeContext';
 import { typography } from '../constants/typography';
 import { getLanguageByCode } from '../constants/languages';
 import { Ionicons } from '@expo/vector-icons';
@@ -47,6 +48,8 @@ function AudioPlayButton({ audioUrl }: { audioUrl: string }) {
 export default function HistoryScreen() {
   const router = useRouter();
   const { user } = useAuth();
+  const { isDark } = useTheme();
+  const styles = useThemeStyles(createStyles);
   const params = useLocalSearchParams<{ sessionId?: string }>();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -124,7 +127,7 @@ export default function HistoryScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar style="dark" />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
       
       {/* Header */}
       <View style={styles.header}>
@@ -490,7 +493,7 @@ export default function HistoryScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: any) => StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,

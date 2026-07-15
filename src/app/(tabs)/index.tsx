@@ -25,10 +25,14 @@ const ACTIONS = [
   { title: 'Voice Clone', caption: 'Clone your voice', iconName: 'voice' as const, route: '/voice-clone' },
 ] as const;
 
+import { useTheme, useThemeStyles } from '../../contexts/ThemeContext';
+
 export default function HomeScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const queryClient = useQueryClient();
+  const { isDark } = useTheme();
+  const styles = useThemeStyles(createStyles);
 
   const { data: profile, isLoading: isProfileLoading } = useQuery<any>({
     queryKey: ['profile', user?.id],
@@ -85,7 +89,7 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
-      <StatusBar style="dark" />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
       <View style={styles.header}>
         <View>
           <BrandLockup size={22} style={{ marginBottom: 4 }} />
@@ -265,7 +269,7 @@ export default function HomeScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: any) => StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.background },
   header: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
@@ -297,13 +301,13 @@ const styles = StyleSheet.create({
   actionCard: {
     flex: 1,
     minHeight: 148,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: colors.card || '#FFFFFF',
     borderRadius: 16,
     padding: spacing.md,
     borderWidth: 1,
-    borderColor: '#E4E4E7',
+    borderColor: colors.border,
     borderBottomWidth: 3,
-    borderBottomColor: '#D4D4D8',
+    borderBottomColor: colors.borderStrong || '#D4D4D8',
     position: 'relative',
     ...Platform.select({
       ios: {
@@ -320,8 +324,8 @@ const styles = StyleSheet.create({
       }
     })
   },
-  actionTitle: { ...typography.label, fontSize: 15, color: '#171717', marginBottom: 2 },
-  actionCaption: { ...typography.caption, color: '#71717A', paddingRight: 18 },
+  actionTitle: { ...typography.label, fontSize: 15, color: colors.textPrimary, marginBottom: 2 },
+  actionCaption: { ...typography.caption, color: colors.textSecondary, paddingRight: 18 },
   actionArrow: { position: 'absolute', right: 14, bottom: 14 },
   recentGroup: { backgroundColor: colors.backgroundSoft, borderRadius: 18, paddingHorizontal: spacing.md },
   recentRow: { minHeight: 68, flexDirection: 'row', alignItems: 'center' },
@@ -340,7 +344,7 @@ const styles = StyleSheet.create({
   cardPressed: {
     transform: [{ translateY: 2 }, { scale: 0.98 }],
     borderBottomWidth: 1,
-    borderColor: '#D4D4D8',
-    backgroundColor: '#FAFAFA',
+    borderColor: colors.borderStrong || '#D4D4D8',
+    backgroundColor: colors.backgroundSoft,
   },
 });

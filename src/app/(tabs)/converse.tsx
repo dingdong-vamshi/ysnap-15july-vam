@@ -20,6 +20,7 @@ import { useAudioPlayer, RecordingPresets, AudioModule } from 'expo-audio';
 import { useAppAudioRecorder, useAppAudioRecorderState } from '../../utils/audioRecorder';
 
 import { colors } from '../../constants/colors';
+import { useTheme, useThemeStyles } from '../../contexts/ThemeContext';
 import { spacing, layout, shadows } from '../../constants/spacing';
 import { typography } from '../../constants/typography';
 import { languages, getLanguageName } from '../../constants/languages';
@@ -43,6 +44,8 @@ export default function ConverseTab() {
   const router = useRouter();
   const { user } = useAuth();
   const queryClient = useQueryClient();
+  const { isDark } = useTheme();
+  const styles = useThemeStyles(createStyles);
 
   const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
@@ -385,7 +388,7 @@ export default function ConverseTab() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar style="dark" />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
 
       {isProcessing && (
         <View style={styles.processingOverlay}>
@@ -701,7 +704,7 @@ export default function ConverseTab() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: any) => StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,

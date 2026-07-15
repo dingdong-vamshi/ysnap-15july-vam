@@ -36,6 +36,65 @@ import { useCreateActivity, useActivityHistoryList, useDeleteActivity } from '..
 import { historyService } from '../../services/historyService';
 import { visualAnalysisService, VisualAnalysisResult, VisualAnalysisCategory } from '../../services/visualAnalysisService';
 
+class WebPCMPlayer {
+  private audioCtx: AudioContext | null = null;
+  private startTime = 0;
+  private sampleRate = 24000;
+
+  constructor() {
+    try {
+      const AudioCtxClass = (window as any).AudioContext || (window as any).webkitAudioContext;
+      this.audioCtx = new AudioCtxClass();
+      this.startTime = this.audioCtx?.currentTime || 0;
+    } catch (e) {
+      console.warn("Web AudioContext is not supported on this browser:", e);
+    }
+  }
+
+  playChunk(base64Data: string) {
+    if (!this.audioCtx) return;
+    try {
+      const binaryString = window.atob(base64Data);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const int16Array = new Int16Array(bytes.buffer);
+      const float32Array = new Float32Array(int16Array.length);
+      for (let i = 0; i < int16Array.length; i++) {
+        float32Array[i] = int16Array[i] / 32768.0;
+      }
+
+      const audioBuffer = this.audioCtx.createBuffer(1, float32Array.length, this.sampleRate);
+      audioBuffer.getChannelData(0).set(float32Array);
+
+      const source = this.audioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(this.audioCtx.destination);
+
+      if (this.startTime < this.audioCtx.currentTime) {
+        this.startTime = this.audioCtx.currentTime;
+      }
+      source.start(this.startTime);
+      this.startTime += audioBuffer.duration;
+    } catch (err) {
+      console.warn("Failed to play PCM audio chunk:", err);
+    }
+  }
+
+  stop() {
+    try {
+      if (this.audioCtx) {
+        this.audioCtx.close();
+        this.audioCtx = null;
+      }
+    } catch (e) {
+      console.warn("Failed to close AudioContext:", e);
+    }
+  }
+}
+
 type CameraMode = 'ocr' | 'food' | 'menu';
 type CameraState =
   | 'requesting_permission'
@@ -108,6 +167,12 @@ export default function CameraScreen() {
   const [followUpHistory, setFollowUpHistory] = useState<Array<{ role: 'user' | 'model'; text: string }>>([]);
   const [followUpLoading, setFollowUpLoading] = useState(false);
 
+  // Gemini Live states
+  const [spokenTranscript, setSpokenTranscript] = useState('');
+  const [isPlayingLiveAudio, setIsPlayingLiveAudio] = useState(false);
+  const liveWsRef = useRef<WebSocket | null>(null);
+  const pcmPlayerRef = useRef<WebPCMPlayer | null>(null);
+
   // Microanimations references
   const breatheAnim = useRef(new Animated.Value(1)).current;
   const scanLineAnim = useRef(new Animated.Value(0)).current;
@@ -132,6 +197,7 @@ export default function CameraScreen() {
   const targetLanguage = profile?.primary_target_language || 'en';
 
   const resetCameraSession = () => {
+    stopSpeaking();
     setCapturedImage(null);
     setAnalysisResult(null);
     setCameraState('ready');
@@ -143,6 +209,114 @@ export default function CameraScreen() {
     setFollowUpHistory([]);
     setFollowUpLoading(false);
     setCurrentRequestId(generateUUID());
+  };
+
+  const stopSpeaking = () => {
+    setIsPlayingLiveAudio(false);
+    if (liveWsRef.current) {
+      try {
+        liveWsRef.current.close();
+      } catch (e) {}
+      liveWsRef.current = null;
+    }
+    if (Platform.OS === 'web' && pcmPlayerRef.current) {
+      try {
+        pcmPlayerRef.current.stop();
+      } catch (e) {}
+      pcmPlayerRef.current = null;
+    }
+  };
+
+  const startLiveSession = async (imageBase64: string, result: VisualAnalysisResult) => {
+    stopSpeaking();
+    setSpokenTranscript('');
+    setIsPlayingLiveAudio(true);
+
+    try {
+      const { token } = await visualAnalysisService.getLiveSessionToken();
+      
+      if (Platform.OS === 'web') {
+        pcmPlayerRef.current = new WebPCMPlayer();
+      }
+
+      const wsUrl = `wss://jstylllvekaqibooizbl.supabase.co/functions/v1/create-gemini-live-token?token=${token}`;
+      const ws = new WebSocket(wsUrl);
+      liveWsRef.current = ws;
+
+      ws.onopen = () => {
+        const setupMsg = {
+          setup: {
+            model: "models/gemini-2.0-flash-exp",
+            generationConfig: {
+              responseModalities: ["audio"],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: "Aoede"
+                  }
+                }
+              }
+            }
+          }
+        };
+        ws.send(JSON.stringify(setupMsg));
+
+        const prompt = `Explain the following visual analysis result naturally and concisely. Keep it to 2-3 sentences.
+Result category: ${result.category}
+Result Title: ${result.title}
+Result Summary: ${result.summary}
+Spoken Summary: ${result.spokenSummary || ''}
+Target Language: ${selectedTargetLanguage || targetLanguage}`;
+
+        const contentMsg = {
+          clientContent: {
+            turns: [
+              {
+                role: "user",
+                parts: [
+                  { text: prompt }
+                ]
+              }
+            ],
+            turnComplete: true
+          }
+        };
+        ws.send(JSON.stringify(contentMsg));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          const parts = raw.serverContent?.modelTurn?.parts || [];
+          for (const part of parts) {
+            if (part.text) {
+              setSpokenTranscript(prev => prev + part.text);
+            }
+            if (part.inlineData && part.inlineData.data) {
+              if (Platform.OS === 'web' && pcmPlayerRef.current) {
+                pcmPlayerRef.current.playChunk(part.inlineData.data);
+              }
+            }
+          }
+        } catch (err) {
+          console.warn("Failed to parse Gemini Live message:", err);
+        }
+      };
+
+      ws.onclose = () => {
+        setIsPlayingLiveAudio(false);
+      };
+
+      ws.onerror = (err) => {
+        console.warn("Gemini Live WS error:", err);
+        setIsPlayingLiveAudio(false);
+      };
+
+    } catch (err: any) {
+      console.warn("Failed to start Live session:", err);
+      setIsPlayingLiveAudio(false);
+      Alert.alert("Gemini Live error", err.message || "Failed to start audio explanation.");
+    }
   };
 
   // Web Camera start
@@ -375,6 +549,46 @@ export default function CameraScreen() {
     }
   };
 
+  const handleGeminiError = (error: any) => {
+    console.error("Gemini Error:", error);
+    const message = error.message || String(error);
+    
+    let title = "Camera Translation Error";
+    let body = "Failed to analyze this image. Please try again.";
+
+    if (message.includes("429") || message.includes("RESOURCE_EXHAUSTED")) {
+      title = "Gemini limit reached";
+      body = "We've received too many requests right now. Please wait a little while and try again.";
+    } else if (message.includes("403") || message.includes("PERMISSION_DENIED")) {
+      title = "Permission Denied";
+      body = "The Gemini API key does not have access to this model.";
+    } else if (message.includes("401") || message.includes("authentication failed")) {
+      title = "Authentication Failed";
+      body = "Gemini authentication failed. Check the secure server configuration.";
+    } else if (message.includes("400") || message.includes("INVALID_ARGUMENT")) {
+      title = "Invalid Image";
+      body = "This image could not be processed. Try another image.";
+    } else if (message.includes("413") || message.includes("oversized")) {
+      title = "Image Too Large";
+      body = "This image is too large. Choose a smaller image.";
+    } else if (message.includes("503") || message.includes("UNAVAILABLE")) {
+      title = "Service Unavailable";
+      body = "Gemini is temporarily unavailable. Please try again shortly.";
+    } else if (message.includes("504") || message.includes("timeout")) {
+      title = "Timeout";
+      body = "The analysis took too long. Try again with a clearer or smaller image.";
+    } else if (message.includes("500")) {
+      title = "Unexpected Error";
+      body = "Gemini encountered an unexpected error. Please try again.";
+    }
+
+    setErrorMessage(body);
+    setCameraState('error');
+    Alert.alert(title, body, [
+      { text: "Close", style: "cancel" }
+    ]);
+  };
+
   // Run Visual Analysis
   const handleStartAnalysis = async () => {
     if (!capturedImage) return;
@@ -383,89 +597,47 @@ export default function CameraScreen() {
     try {
       setCameraState('analysing');
 
-      // Abstraction adapter call fallback to the Edge Function 'analyse-image'
-      let data: any;
-      try {
-        data = await visualAnalysisService.analyseCapturedImage(capturedImage, targetLanguage, mode);
-      } catch (serviceErr: any) {
-        if (serviceErr.message?.includes('not configured')) {
-          const formData = new FormData();
-          if (Platform.OS === 'web') {
-            const response = await fetch(capturedImage);
-            const blob = await response.blob();
-            formData.append('file', blob, `camera.${blob.type.includes('png') ? 'png' : 'jpg'}`);
-          } else {
-            formData.append('file', { uri: capturedImage, name: 'camera.jpg', type: 'image/jpeg' } as any);
-          }
-          formData.append('target', targetLanguage);
-          formData.append('mode', mode);
-
-          const { data: edgeData, error } = await callEdgeFunction<any>('analyse-image', formData);
-          if (error || !edgeData) throw error || new Error('The camera analysis returned no result.');
-          data = edgeData;
-        } else {
-          throw serviceErr;
-        }
-      }
-
-      const food = data.food_info;
-      const resVal: VisualAnalysisResult = {
-        category: food ? 'food' : 'text',
-        title: food ? (food.translated_name || food.name || 'Food Scan') : 'Text Scan Result',
-        summary: data.analysis || (food ? `Detected meal item with macros.` : `Scanned text translation output.`),
-        confidence: food?.confidence ? Number(food.confidence) : undefined,
-        detectedText: data.ocr_text ? [{ text: data.ocr_text }] : undefined,
-        entities: [],
-        food: food ? {
-          name: food.name,
-          visibleIngredients: food.allergens || [],
-          description: food.translated_name
-        } : undefined,
-        suggestedActions: food ? ['translate', 'ask_follow_up'] : ['translate', 'explain', 'read_aloud', 'ask_follow_up']
-      };
-
-      // Set state values
-      setAnalysisResult(resVal);
-      setCameraState('result');
-
-      // If food info contains macros, add it to mock breakdown
-      if (food) {
-        (resVal as any).foodInfo = {
-          name: food.name,
-          translatedName: food.translated_name,
-          calories: food.calories || 0,
-          protein: food.protein || '0g',
-          carbs: food.carbs || '0g',
-          fat: food.fat || '0g',
-          allergens: food.allergens || [],
-          confidence: food.confidence || 100
+      const data = await visualAnalysisService.analyseCapturedImage(capturedImage, targetLanguage, mode);
+      
+      // Enforce default translation values if missing
+      if (!data.defaultTranslation) {
+        data.defaultTranslation = {
+          sourceLanguage: data.detectedLanguage?.name || 'auto',
+          targetLanguage: 'en',
+          sourceText: data.detectedText?.[0]?.text || '',
+          translatedText: data.summary || ''
         };
       }
+
+      setAnalysisResult(data);
+      setCameraState('result');
+
+      // Play Gemini Live speech explanation!
+      startLiveSession(capturedImage, data);
 
       // Save to unified activity_history in Supabase
       if (user) {
         try {
-          const titleText = mode === 'food' 
-            ? `Food Scan: ${food?.translated_name || food?.name || 'Detected food'}`
+          const titleText = data.title || (mode === 'food' 
+            ? `Food Scan: ${data.food?.name || 'Detected food'}`
             : mode === 'menu' 
               ? 'Menu Scan Translation' 
-              : 'OCR Text Scan Translation';
+              : 'OCR Text Scan Translation');
 
           const activity = await createActivityMutation.mutateAsync({
             client_request_id: currentRequestId,
             tool: 'camera',
             operation_type: mode,
             title: titleText,
-            source_text: data.ocr_text || food?.name || 'Camera scan image',
-            translated_text: data.translated_text || food?.translated_name || '',
+            source_text: data.defaultTranslation?.sourceText || data.detectedText?.[0]?.text || data.summary || 'Camera scan image',
+            translated_text: data.defaultTranslation?.translatedText || data.detectedText?.[0]?.translatedText || '',
             metadata: {
               mode,
-              confidence: food?.confidence ? Math.round(Number(food.confidence)) : undefined,
-              calories: food?.calories ? Number(food.calories) : undefined,
-              protein: food?.protein || undefined,
-              carbs: food?.carbs || undefined,
-              fat: food?.fat || undefined,
-              allergens: food?.allergens || undefined,
+              category: data.category,
+              confidence: data.confidence,
+              product: data.product,
+              food: data.food,
+              landmark: data.landmark,
             }
           });
 
@@ -485,10 +657,7 @@ export default function CameraScreen() {
       queryClient.invalidateQueries({ queryKey: ['activityHistory', user?.id] });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error: any) {
-      console.error(error);
-      setCameraState('error');
-      setErrorMessage(error.message || 'Failed to analyze this image.');
-      Alert.alert('Camera Translation Error', error.message || 'Failed to analyze this image.');
+      handleGeminiError(error);
     }
   };
 
@@ -820,62 +989,121 @@ export default function CameraScreen() {
       {/* Analysis Details Panel */}
       {analysisResult && cameraState === 'result' && (
         <ScrollView style={styles.resultsSheet} contentContainerStyle={styles.resultsSheetContent} showsVerticalScrollIndicator={false}>
-          {mode === 'food' && (analysisResult as any).foodInfo ? (
-            /* FOOD ANALYSIS SCREEN DISPLAY */
-            <View style={styles.foodReportCard}>
-              <View style={styles.foodReportHeader}>
-                <View style={styles.foodTitleRow}>
-                  <Text style={styles.foodReportTitle}>{(analysisResult as any).foodInfo.translatedName}</Text>
-                  <Text style={styles.foodReportSubTitle}>Original: {(analysisResult as any).foodInfo.name}</Text>
-                </View>
-                <View style={styles.matchBadge}>
-                  <Text style={styles.matchBadgeText}>{(analysisResult as any).foodInfo.confidence}% Match</Text>
-                </View>
-              </View>
+          
+          {/* Unified Category Badge & Title */}
+          <View style={styles.resultHeaderCard}>
+            <View style={styles.categoryBadgeRow}>
+              <Text style={styles.categoryBadgeText}>
+                {analysisResult.category.toUpperCase().replace('_', ' ')}
+              </Text>
+              {analysisResult.confidence && (
+                <Text style={styles.confidenceText}>
+                  {Math.round(analysisResult.confidence)}% Match
+                </Text>
+              )}
+            </View>
+            <Text style={styles.resultTitle}>{analysisResult.title}</Text>
+            <Text style={styles.resultSummary}>{analysisResult.summary}</Text>
+          </View>
 
-              {/* Nutrition breakdown grids */}
-              <View style={styles.macroRow}>
-                <View style={styles.macroItem}>
-                  <Text style={styles.macroValue}>{(analysisResult as any).foodInfo.calories}</Text>
-                  <Text style={styles.macroLabel}>CALORIES</Text>
-                </View>
-                <View style={styles.macroItem}>
-                  <Text style={[styles.macroValue, { color: colors.accentBlue }]}>{(analysisResult as any).foodInfo.protein}</Text>
-                  <Text style={styles.macroLabel}>PROTEIN</Text>
-                </View>
-                <View style={styles.macroItem}>
-                  <Text style={[styles.macroValue, { color: colors.accentOrange }]}>{(analysisResult as any).foodInfo.carbs}</Text>
-                  <Text style={styles.macroLabel}>CARBS</Text>
-                </View>
-                <View style={styles.macroItem}>
-                  <Text style={[styles.macroValue, { color: colors.accentCoral }]}>{(analysisResult as any).foodInfo.fat}</Text>
-                  <Text style={styles.macroLabel}>FAT</Text>
-                </View>
+          {/* Spoken Explanation & Live Transcript */}
+          {(spokenTranscript !== '' || isPlayingLiveAudio) && (
+            <View style={styles.spokenExplanationCard}>
+              <View style={styles.spokenExplanationHeader}>
+                <Text style={styles.spokenExplanationTitle}>SPOKEN EXPLANATION</Text>
+                {isPlayingLiveAudio ? (
+                  <TouchableOpacity style={styles.audioControlBtn} onPress={stopSpeaking}>
+                    <Ionicons name="volume-mute-outline" size={16} color={colors.danger} />
+                    <Text style={[styles.audioControlBtnText, { color: colors.danger }]}>Stop</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity style={styles.audioControlBtn} onPress={() => startLiveSession(capturedImage || '', analysisResult)}>
+                    <Ionicons name="volume-high-outline" size={16} color={colors.primary} />
+                    <Text style={[styles.audioControlBtnText, { color: colors.primary }]}>Replay</Text>
+                  </TouchableOpacity>
+                )}
               </View>
-
-              {/* Allergens Warn Card */}
-              {Array.isArray((analysisResult as any).foodInfo.allergens) && (analysisResult as any).foodInfo.allergens.length > 0 && (
-                <View style={styles.allergenAlertCard}>
-                  <Ionicons name="warning-outline" size={16} color={colors.warning} />
-                  <Text style={styles.allergenAlertText}>
-                    Warnings: {(analysisResult as any).foodInfo.allergens.join(', ')}
-                  </Text>
+              <Text style={styles.spokenTranscriptText}>
+                {spokenTranscript || "Connecting to Gemini Live..."}
+              </Text>
+              {!isPlayingLiveAudio && spokenTranscript !== '' && (
+                <View style={styles.transcriptActionRow}>
+                  <TouchableOpacity style={styles.transcriptActionBtn} onPress={() => Alert.alert("Copied", spokenTranscript)}>
+                    <Ionicons name="copy-outline" size={14} color={colors.textSecondary} />
+                    <Text style={styles.transcriptActionText}>Copy</Text>
+                  </TouchableOpacity>
                 </View>
               )}
             </View>
-          ) : (
-            /* OCR TEXT RESULTS SCREEN DISPLAY */
+          )}
+
+          {/* Text/Document OCR Card */}
+          {(analysisResult.detectedText && analysisResult.detectedText.length > 0) && (
             <View style={styles.textReportCard}>
               <Text style={styles.sectionLabel}>DETECTED TEXT</Text>
-              <Text style={styles.ocrSourceText}>{analysisResult.detectedText?.[0]?.text || analysisResult.summary}</Text>
+              <Text style={styles.ocrSourceText}>
+                {analysisResult.detectedText.map(t => t.text).join('\n')}
+              </Text>
               
-              {translationResult && (
+              {(translationResult || analysisResult.defaultTranslation?.translatedText) && (
                 <>
                   <Ionicons name="arrow-down" size={18} color={colors.textMuted} style={styles.textArrow} />
                   <Text style={styles.sectionLabel}>TRANSLATION</Text>
-                  <Text style={styles.ocrTranslatedText}>{translationResult}</Text>
+                  <Text style={styles.ocrTranslatedText}>
+                    {translationResult || analysisResult.defaultTranslation?.translatedText}
+                  </Text>
                 </>
               )}
+            </View>
+          )}
+
+          {/* Product details */}
+          {analysisResult.product && (
+            <View style={styles.infoDetailsCard}>
+              <Text style={styles.sectionLabel}>PRODUCT INFO</Text>
+              <Text style={styles.detailRow}>Name: {analysisResult.product.name}</Text>
+              <Text style={styles.detailRow}>Brand: {analysisResult.product.brand}</Text>
+              {analysisResult.product.visibleClaims && analysisResult.product.visibleClaims.length > 0 && (
+                <Text style={styles.detailRow}>Claims: {analysisResult.product.visibleClaims.join(', ')}</Text>
+              )}
+            </View>
+          )}
+
+          {/* Food details */}
+          {analysisResult.food && (
+            <View style={styles.infoDetailsCard}>
+              <Text style={styles.sectionLabel}>FOOD & NUTRITION</Text>
+              <Text style={styles.detailRow}>Item: {analysisResult.food.name}</Text>
+              {analysisResult.food.visibleIngredients && analysisResult.food.visibleIngredients.length > 0 && (
+                <Text style={styles.detailRow}>Ingredients: {analysisResult.food.visibleIngredients.join(', ')}</Text>
+              )}
+              {analysisResult.food.visibleNutritionText && analysisResult.food.visibleNutritionText.length > 0 && (
+                <Text style={styles.detailRow}>Nutrition: {analysisResult.food.visibleNutritionText.join(', ')}</Text>
+              )}
+            </View>
+          )}
+
+          {/* Landmark details */}
+          {analysisResult.landmark && (
+            <View style={styles.infoDetailsCard}>
+              <Text style={styles.sectionLabel}>LANDMARK INFO</Text>
+              <Text style={styles.detailRow}>Name: {analysisResult.landmark.name}</Text>
+              <Text style={styles.detailRow}>Location: {analysisResult.landmark.city}, {analysisResult.landmark.country}</Text>
+              <Text style={styles.detailRow}>History: {analysisResult.landmark.briefHistory}</Text>
+            </View>
+          )}
+
+          {/* Entities/Objects Card */}
+          {analysisResult.entities && analysisResult.entities.length > 0 && (
+            <View style={styles.entitiesCard}>
+              <Text style={styles.sectionLabel}>IDENTIFIED OBJECTS</Text>
+              <View style={styles.entityTagContainer}>
+                {analysisResult.entities.map((ent, idx) => (
+                  <View key={idx} style={styles.entityTag}>
+                    <Text style={styles.entityTagText}>{ent.name}</Text>
+                  </View>
+                ))}
+              </View>
             </View>
           )}
 
@@ -1725,6 +1953,143 @@ const createStyles = (colors: any) => StyleSheet.create({
   },
   langRowText: {
     ...typography.bodyMedium,
+    color: colors.textPrimary,
+  },
+  spokenExplanationCard: {
+    backgroundColor: colors.surfaceSoft || '#F4F4F5',
+    borderWidth: 1,
+    borderColor: colors.border || '#E4E4E7',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+  },
+  spokenExplanationHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  spokenExplanationTitle: {
+    fontSize: 11,
+    fontFamily: typography.captionMedium.fontFamily,
+    fontWeight: '700',
+    color: colors.textMuted || '#71717A',
+    letterSpacing: 0.5,
+  },
+  audioControlBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  audioControlBtnText: {
+    fontSize: 12,
+    fontFamily: typography.captionMedium.fontFamily,
+    fontWeight: '600',
+  },
+  spokenTranscriptText: {
+    fontSize: 14,
+    fontFamily: typography.body.fontFamily,
+    color: colors.textPrimary,
+    lineHeight: 20,
+  },
+  transcriptActionRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: 8,
+  },
+  transcriptActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  transcriptActionText: {
+    fontSize: 12,
+    fontFamily: typography.captionMedium.fontFamily,
+    color: colors.textSecondary,
+  },
+  resultHeaderCard: {
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+  },
+  categoryBadgeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  categoryBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.primary,
+    backgroundColor: colors.backgroundSoft,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    letterSpacing: 0.5,
+  },
+  confidenceText: {
+    fontSize: 12,
+    color: colors.textMuted,
+  },
+  resultTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: colors.textPrimary,
+    marginBottom: 6,
+  },
+  resultSummary: {
+    fontSize: 14,
+    color: colors.textSecondary,
+    lineHeight: 20,
+  },
+  infoDetailsCard: {
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+  },
+  detailRow: {
+    fontSize: 14,
+    color: colors.textPrimary,
+    marginBottom: 6,
+  },
+  entitiesCard: {
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+  },
+  entityTagContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+  },
+  entityTag: {
+    backgroundColor: colors.backgroundSoft,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  entityTagText: {
+    fontSize: 13,
     color: colors.textPrimary,
   },
 });
