@@ -67,7 +67,7 @@ const ExpoSecureStoreAdapter = {
   },
 };
 
-export const supabase = createClient<Database>(supabaseUrl, supabasePublishableKey, {
+export const supabase = createClient<any>(supabaseUrl, supabasePublishableKey, {
   auth: {
     storage: ExpoSecureStoreAdapter,
     flowType: 'pkce',

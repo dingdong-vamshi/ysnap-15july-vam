@@ -124,8 +124,8 @@ export function getActiveColors() {
   return currentThemeMode === 'dark' ? darkColors : lightColors;
 }
 
-// Export colors as a Proxy that resolves properties to the active theme dynamically
-export const colors = new Proxy({} as typeof lightColors, {
+// Export colors as an any Proxy to avoid TS compiler resolution crashes
+export const colors: any = new Proxy({} as any, {
   get(target, prop) {
     return getActiveColors()[prop as keyof typeof lightColors];
   }

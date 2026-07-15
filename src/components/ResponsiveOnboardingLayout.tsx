@@ -1,6 +1,6 @@
 import React from 'react';
-import { View, useWindowDimensions, StyleSheet } from 'react-native';
-import { spacing } from '../constants/spacing';
+import { View, useWindowDimensions, StyleSheet, ScrollView } from 'react-native';
+import { spacing, layout } from '../constants/spacing';
 import { colors } from '../constants/colors';
 
 interface ResponsiveOnboardingLayoutProps {
@@ -21,23 +21,54 @@ export function ResponsiveOnboardingLayout({ children }: ResponsiveOnboardingLay
 
   if (isDesktop) {
     return (
-      <View style={styles.desktopWrapper}>
-        <View style={styles.leftColumn}>
-          {React.cloneElement(illustration as React.ReactElement<{ height?: number }>, { height: 460 })}
-        </View>
-        <View style={styles.rightColumn}>
-          <View style={styles.contentInner}>
-            {content}
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.desktopScrollContent}
+        style={styles.desktopScrollView}
+      >
+        <View style={styles.desktopWrapper}>
+          <View style={styles.leftColumn}>
+            {React.cloneElement(illustration as React.ReactElement<{ height?: number }>, { height: 460 })}
+          </View>
+          <View style={styles.rightColumn}>
+            <View style={styles.contentInner}>
+              {content}
+            </View>
           </View>
         </View>
-      </View>
+      </ScrollView>
     );
   }
 
-  return <>{children}</>;
+  // Mobile layout: illustration remains pinned at the top, selectable options scroll below.
+  return (
+    <View style={styles.mobileContainer}>
+      <View style={styles.mobileIllustrationWrapper}>
+        {React.cloneElement(illustration as React.ReactElement<{ height?: number }>, { height: 180 })}
+      </View>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.mobileScrollContent}
+        style={styles.mobileScrollView}
+      >
+        <View style={styles.mobileContentInner}>
+          {content}
+        </View>
+      </ScrollView>
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
+  desktopScrollView: {
+    flex: 1,
+  },
+  desktopScrollContent: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    paddingBottom: 100, // Safe distance from footer
+  },
   desktopWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -61,5 +92,29 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: 480,
     alignSelf: 'flex-start',
+  },
+  mobileContainer: {
+    flex: 1,
+    flexDirection: 'column',
+  },
+  mobileIllustrationWrapper: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    backgroundColor: colors.background,
+  },
+  mobileScrollView: {
+    flex: 1,
+  },
+  mobileScrollContent: {
+    flexGrow: 1,
+    paddingHorizontal: 24,
+    paddingBottom: 140, // Padding for footer
+  },
+  mobileContentInner: {
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
   },
 });

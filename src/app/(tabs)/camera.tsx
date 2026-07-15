@@ -13,31 +13,66 @@ import {
   Linking,
   Platform,
   Modal,
+  TextInput,
+  Animated,
+  useWindowDimensions,
 } from 'react-native';
 import { CameraView, useCameraPermissions, FlashMode } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
-import { useNavigation } from 'expo-router';
+import { useNavigation, useFocusEffect } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
-import { colors } from '@/constants/colors';
+import { colors, lightColors } from '@/constants/colors';
 import { spacing, layout, shadows } from '@/constants/spacing';
 import { typography } from '@/constants/typography';
 import { callEdgeFunction, supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
+import { useTheme } from '@/contexts/ThemeContext';
 import { getLanguageName } from '@/constants/languages';
 import { generateUUID } from '../../utils/uuid';
 import { useCreateActivity, useActivityHistoryList, useDeleteActivity } from '../../hooks/useActivityHistory';
 import { historyService } from '../../services/historyService';
-
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+import { visualAnalysisService, VisualAnalysisResult, VisualAnalysisCategory } from '../../services/visualAnalysisService';
 
 type CameraMode = 'ocr' | 'food' | 'menu';
+type CameraState =
+  | 'requesting_permission'
+  | 'permission_denied'
+  | 'ready'
+  | 'capturing'
+  | 'captured'
+  | 'preparing'
+  | 'analysing'
+  | 'result'
+  | 'follow_up'
+  | 'error';
+
+const searchLanguages = [
+  { code: 'en', name: 'English' },
+  { code: 'es', name: 'Spanish' },
+  { code: 'fr', name: 'French' },
+  { code: 'de', name: 'German' },
+  { code: 'ja', name: 'Japanese' },
+  { code: 'hi', name: 'Hindi' },
+  { code: 'zh', name: 'Chinese' },
+  { code: 'ar', name: 'Arabic' },
+  { code: 'pt', name: 'Portuguese' },
+  { code: 'ru', name: 'Russian' }
+];
 
 export default function CameraScreen() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
+  const { isDark } = useTheme();
+  const styles = createStyles(colors);
+  const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = useWindowDimensions();
+
+  // State Machine
+  const [cameraState, setCameraState] = useState<CameraState>('ready');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [progressMessage, setProgressMessage] = useState<string>('');
 
   const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
   const [historyVisible, setHistoryVisible] = useState(false);
@@ -46,7 +81,7 @@ export default function CameraScreen() {
   const deleteActivityMutation = useDeleteActivity();
   const { data: history = [], isLoading: loadingHistory } = useActivityHistoryList({ tool: 'camera', limit: 5 });
 
-  // Permissions hook
+  // Permissions hook (Native only)
   const [permission, requestPermission] = useCameraPermissions();
 
   // Camera Settings
@@ -54,27 +89,37 @@ export default function CameraScreen() {
   const [flash, setFlash] = useState<FlashMode>('off');
   const cameraRef = useRef<any>(null);
 
-  // Flow State
-  const [isProcessing, setIsProcessing] = useState(false);
+  // Web MediaStream References
+  const videoRef = useRef<any>(null);
+  const [webStream, setWebStream] = useState<any>(null);
+
+  // Image URI and Results
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  const [analysisResult, setAnalysisResult] = useState<VisualAnalysisResult | null>(null);
 
-  // Gemini vision analysis returned by the authenticated Edge Function.
-  const [analysisResult, setAnalysisResult] = useState<{
-    originalText: string;
-    translatedText: string;
-    foodInfo?: {
-      name: string;
-      translatedName: string;
-      calories: number;
-      protein: string;
-      carbs: string;
-      fat: string;
-      allergens: string[];
-      confidence: number;
-    };
-    ocrBoxes?: Array<{ text: string; translated: string; x: number; y: number; w: number; h: number }>;
-  } | null>(null);
+  // Translation states
+  const [langSheetVisible, setLangSheetVisible] = useState(false);
+  const [langSearchQuery, setLangSearchQuery] = useState('');
+  const [translationResult, setTranslationResult] = useState<string | null>(null);
+  const [selectedTargetLanguage, setSelectedTargetLanguage] = useState<string | null>(null);
 
+  // Follow-up interaction states
+  const [followUpQuestion, setFollowUpQuestion] = useState('');
+  const [followUpHistory, setFollowUpHistory] = useState<Array<{ role: 'user' | 'model'; text: string }>>([]);
+  const [followUpLoading, setFollowUpLoading] = useState(false);
+
+  // Microanimations references
+  const breatheAnim = useRef(new Animated.Value(1)).current;
+  const scanLineAnim = useRef(new Animated.Value(0)).current;
+  const flashAnim = useRef(new Animated.Value(0)).current;
+  const focusScale = useRef(new Animated.Value(1)).current;
+  const focusOpacity = useRef(new Animated.Value(1)).current;
+  const [focusIndicator, setFocusIndicator] = useState<{ x: number; y: number } | null>(null);
+
+  const navigation = useNavigation();
+  const isFocused = navigation.isFocused();
+
+  // Profile preferences
   const { data: profile } = useQuery<any>({
     queryKey: ['profile', user?.id],
     queryFn: async () => {
@@ -86,79 +131,182 @@ export default function CameraScreen() {
   });
   const targetLanguage = profile?.primary_target_language || 'en';
 
-  const saveBookmarkMutation = useMutation<any, any, void>({
-    mutationFn: async () => {
-      if (!user || !analysisResult) throw new Error('No analysis result to save');
-      const { data, error } = await supabase.from('bookmarks').insert({
-        user_id: user.id,
-        source_text: analysisResult.foodInfo ? analysisResult.foodInfo.name : analysisResult.originalText,
-        translated_text: analysisResult.foodInfo ? analysisResult.foodInfo.translatedName : analysisResult.translatedText,
-        source_language: 'auto',
-        target_language: 'en',
-        tags: [mode],
-        note: mode === 'food' ? `Calories: ${analysisResult.foodInfo?.calories} kcal` : 'OCR Scan',
-      } as any);
+  const resetCameraSession = () => {
+    setCapturedImage(null);
+    setAnalysisResult(null);
+    setCameraState('ready');
+    setErrorMessage(null);
+    setProgressMessage('');
+    setTranslationResult(null);
+    setSelectedTargetLanguage(null);
+    setFollowUpQuestion('');
+    setFollowUpHistory([]);
+    setFollowUpLoading(false);
+    setCurrentRequestId(generateUUID());
+  };
 
-      if (error) throw error;
-      return data;
-    },
-    onSuccess: () => {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      Alert.alert('Saved', 'Added translation to bookmarks folder.');
-    },
-    onError: (err) => {
-      Alert.alert('Error', err.message);
-    },
-  });
+  // Web Camera start
+  const startWebCamera = async () => {
+    if (Platform.OS !== 'web') return;
+    try {
+      setCameraState('requesting_permission');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      });
+      setWebStream(stream);
+      setCameraState('ready');
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play().catch((e: any) => console.log('Video play error:', e));
+      }
+    } catch (err: any) {
+      console.warn('Web media stream permission error:', err);
+      setCameraState('permission_denied');
+      setErrorMessage(err.message || 'Camera permission was denied. Upload an image instead.');
+    }
+  };
 
-  const navigation = useNavigation();
-  const [isFocused, setIsFocused] = useState(navigation.isFocused());
+  // Web Camera stop
+  const stopWebCamera = () => {
+    if (Platform.OS !== 'web') return;
+    if (webStream) {
+      webStream.getTracks().forEach((track: any) => track.stop());
+      setWebStream(null);
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
 
+  // Handle Tab Focus Lifecycle
+  useFocusEffect(
+    React.useCallback(() => {
+      resetCameraSession();
+      if (Platform.OS === 'web') {
+        startWebCamera();
+      }
+      return () => {
+        resetCameraSession();
+        if (Platform.OS === 'web') {
+          stopWebCamera();
+        }
+      };
+    }, [navigation])
+  );
+
+  // Handle Web Page Visibility Changes
   useEffect(() => {
-    const unsubscribeFocus = navigation.addListener('focus', () => {
-      setIsFocused(true);
-    });
-    const unsubscribeBlur = navigation.addListener('blur', () => {
-      setIsFocused(false);
-    });
+    if (Platform.OS !== 'web') return;
 
-    return () => {
-      unsubscribeFocus();
-      unsubscribeBlur();
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        stopWebCamera();
+      } else if (isFocused && !capturedImage) {
+        startWebCamera();
+      }
     };
-  }, [navigation]);
 
-  if (!permission) {
-    // Camera permissions are still loading
-    return (
-      <View style={styles.centeredContainer}>
-        <ActivityIndicator size="large" color={colors.primary} />
-      </View>
-    );
-  }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [isFocused, capturedImage, webStream]);
 
-  if (!permission.granted) {
-    const cannotAskAgain = !permission.canAskAgain;
-    return (
-      <View style={styles.permissionContainer}>
-        <Ionicons name="camera-outline" size={64} color={colors.disabled} />
-        <Text style={styles.permissionTitle}>Camera Access Required</Text>
-        <Text style={styles.permissionSubtitle}>
-          {cannotAskAgain
-            ? "Camera access was permanently denied. Please enable it in Settings to translate menus, signs, or products."
-            : "We need permission to use the camera to translate menus, text, and scan food products."}
-        </Text>
-        <TouchableOpacity 
-          style={styles.primaryBtn} 
-          onPress={cannotAskAgain ? () => Linking.openSettings() : requestPermission}
-        >
-          <Text style={styles.primaryBtnText}>
-            {cannotAskAgain ? "Open Settings" : "Grant Permission"}
-          </Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
+  // Breathing brackets animation
+  useEffect(() => {
+    if (cameraState === 'ready') {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(breatheAnim, {
+            toValue: 0.7,
+            duration: 1500,
+            useNativeDriver: true,
+          }),
+          Animated.timing(breatheAnim, {
+            toValue: 1.0,
+            duration: 1500,
+            useNativeDriver: true,
+          }),
+        ])
+      ).start();
+    } else {
+      breatheAnim.setValue(1.0);
+    }
+  }, [cameraState]);
+
+  // Scanner vertical bar animation
+  useEffect(() => {
+    if (cameraState === 'analysing') {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(scanLineAnim, {
+            toValue: 1,
+            duration: 2000,
+            useNativeDriver: true,
+          }),
+          Animated.timing(scanLineAnim, {
+            toValue: 0,
+            duration: 2000,
+            useNativeDriver: true,
+          }),
+        ])
+      ).start();
+    } else {
+      scanLineAnim.setValue(0);
+    }
+  }, [cameraState]);
+
+  // Gradual progress messages animation
+  useEffect(() => {
+    if (cameraState === 'analysing') {
+      const messages = [
+        "Looking at the image...",
+        "Reading visible text...",
+        "Identifying objects...",
+        "Preparing useful actions..."
+      ];
+      let idx = 0;
+      setProgressMessage(messages[0]);
+      const interval = setInterval(() => {
+        idx = (idx + 1) % messages.length;
+        setProgressMessage(messages[idx]);
+      }, 1500);
+      return () => clearInterval(interval);
+    }
+  }, [cameraState]);
+
+  const triggerShutterFlash = () => {
+    flashAnim.setValue(1);
+    Animated.timing(flashAnim, {
+      toValue: 0,
+      duration: 300,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const handleFocusTap = (e: any) => {
+    if (cameraState !== 'ready') return;
+    const { locationX, locationY } = e.nativeEvent;
+    setFocusIndicator({ x: locationX, y: locationY });
+    focusScale.setValue(1.3);
+    focusOpacity.setValue(1);
+
+    Animated.parallel([
+      Animated.timing(focusScale, {
+        toValue: 0.8,
+        duration: 400,
+        useNativeDriver: true,
+      }),
+      Animated.timing(focusOpacity, {
+        toValue: 0,
+        duration: 450,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      setFocusIndicator(null);
+    });
+  };
 
   // Flash Toggle
   const toggleFlash = () => {
@@ -166,28 +314,46 @@ export default function CameraScreen() {
     setFlash((current) => (current === 'off' ? 'on' : 'off'));
   };
 
-  // Capture Image
+  // Main Capture Trigger
   const handleCapture = async () => {
-    if (!cameraRef.current || isProcessing) return;
+    if (cameraState !== 'ready') return;
 
     try {
+      setCameraState('capturing');
+      triggerShutterFlash();
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-      setIsProcessing(true);
 
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.85,
-        skipProcessing: false,
-      });
-
-      await processImage(photo.uri, 'image/jpeg');
-    } catch (err) {
+      if (Platform.OS === 'web') {
+        if (!videoRef.current) throw new Error('Webcam not ready');
+        const canvas = document.createElement('canvas');
+        canvas.width = videoRef.current.videoWidth || 640;
+        canvas.height = videoRef.current.videoHeight || 480;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+        }
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        setCapturedImage(dataUrl);
+        setCameraState('captured');
+        stopWebCamera();
+      } else {
+        if (!cameraRef.current) throw new Error('Camera view not initialized');
+        const photo = await cameraRef.current.takePictureAsync({
+          quality: 0.85,
+          skipProcessing: false,
+        });
+        setCapturedImage(photo.uri);
+        setCameraState('captured');
+      }
+    } catch (err: any) {
       console.error('Capture error:', err);
-      setIsProcessing(false);
-      Alert.alert('Camera Error', err instanceof Error ? err.message : 'Could not capture this image.');
+      setCameraState('error');
+      setErrorMessage(err.message || 'Could not capture this image.');
+      Alert.alert('Camera Error', err.message || 'Could not capture this image.');
     }
   };
 
-  // Launch Gallery
+  // Gallery Picker
   const handlePickImage = async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     try {
@@ -198,61 +364,83 @@ export default function CameraScreen() {
       });
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
-        await processImage(result.assets[0].uri, result.assets[0].mimeType || 'image/jpeg');
+        setCapturedImage(result.assets[0].uri);
+        setCameraState('captured');
+        if (Platform.OS === 'web') {
+          stopWebCamera();
+        }
       }
     } catch (err) {
       console.log('Image picker error:', err);
     }
   };
 
-  // Process Captured/Picked Image
-  const processImage = async (uri: string, mimeType = 'image/jpeg') => {
-    if (!user) {
-      setIsProcessing(false);
-      Alert.alert('Sign In Required', 'Sign in to use camera translation.');
-      return;
-    }
-    setCapturedImage(uri);
-    setIsProcessing(true);
-    try {
-      const formData = new FormData();
-      if (Platform.OS === 'web') {
-        const response = await fetch(uri);
-        const blob = await response.blob();
-        formData.append('file', blob, `camera.${blob.type.includes('png') ? 'png' : 'jpg'}`);
-      } else {
-        formData.append('file', { uri, name: 'camera.jpg', type: mimeType } as any);
-      }
-      formData.append('target', targetLanguage);
-      formData.append('mode', mode);
+  // Run Visual Analysis
+  const handleStartAnalysis = async () => {
+    if (!capturedImage) return;
 
-      const { data, error } = await callEdgeFunction<any>('analyse-image', formData);
-      if (error || !data) throw error || new Error('The camera analysis returned no result.');
+    setCameraState('preparing');
+    try {
+      setCameraState('analysing');
+
+      // Abstraction adapter call fallback to the Edge Function 'analyse-image'
+      let data: any;
+      try {
+        data = await visualAnalysisService.analyseCapturedImage(capturedImage, targetLanguage, mode);
+      } catch (serviceErr: any) {
+        if (serviceErr.message?.includes('not configured')) {
+          const formData = new FormData();
+          if (Platform.OS === 'web') {
+            const response = await fetch(capturedImage);
+            const blob = await response.blob();
+            formData.append('file', blob, `camera.${blob.type.includes('png') ? 'png' : 'jpg'}`);
+          } else {
+            formData.append('file', { uri: capturedImage, name: 'camera.jpg', type: 'image/jpeg' } as any);
+          }
+          formData.append('target', targetLanguage);
+          formData.append('mode', mode);
+
+          const { data: edgeData, error } = await callEdgeFunction<any>('analyse-image', formData);
+          if (error || !edgeData) throw error || new Error('The camera analysis returned no result.');
+          data = edgeData;
+        } else {
+          throw serviceErr;
+        }
+      }
 
       const food = data.food_info;
-      const resVal = {
-        originalText: data.ocr_text || food?.name || data.analysis || 'No readable text detected',
-        translatedText: data.translated_text || food?.translated_name || data.analysis || '',
-        foodInfo: food ? {
-          name: food.name || data.ocr_text || 'Detected food',
-          translatedName: food.translated_name || data.translated_text || food.name || 'Detected food',
-          calories: Number(food.calories || 0),
-          protein: food.protein || 'Unknown',
-          carbs: food.carbs || 'Unknown',
-          fat: food.fat || 'Unknown',
-          allergens: Array.isArray(food.allergens) ? food.allergens : [],
-          confidence: Math.round(Number(food.confidence || 0)),
+      const resVal: VisualAnalysisResult = {
+        category: food ? 'food' : 'text',
+        title: food ? (food.translated_name || food.name || 'Food Scan') : 'Text Scan Result',
+        summary: data.analysis || (food ? `Detected meal item with macros.` : `Scanned text translation output.`),
+        confidence: food?.confidence ? Number(food.confidence) : undefined,
+        detectedText: data.ocr_text ? [{ text: data.ocr_text }] : undefined,
+        entities: [],
+        food: food ? {
+          name: food.name,
+          visibleIngredients: food.allergens || [],
+          description: food.translated_name
         } : undefined,
-        ocrBoxes: Array.isArray(data.ocr_boxes) ? data.ocr_boxes.map((box: any) => ({
-          text: String(box.text || ''),
-          translated: String(box.translated || ''),
-          x: Number(box.x || 0) * 0.36,
-          y: Number(box.y || 0) * 0.64,
-          w: Number(box.width || 0) * 0.36,
-          h: Number(box.height || 0) * 0.64,
-        })) : [],
+        suggestedActions: food ? ['translate', 'ask_follow_up'] : ['translate', 'explain', 'read_aloud', 'ask_follow_up']
       };
+
+      // Set state values
       setAnalysisResult(resVal);
+      setCameraState('result');
+
+      // If food info contains macros, add it to mock breakdown
+      if (food) {
+        (resVal as any).foodInfo = {
+          name: food.name,
+          translatedName: food.translated_name,
+          calories: food.calories || 0,
+          protein: food.protein || '0g',
+          carbs: food.carbs || '0g',
+          fat: food.fat || '0g',
+          allergens: food.allergens || [],
+          confidence: food.confidence || 100
+        };
+      }
 
       // Save to unified activity_history in Supabase
       if (user) {
@@ -268,8 +456,8 @@ export default function CameraScreen() {
             tool: 'camera',
             operation_type: mode,
             title: titleText,
-            source_text: resVal.originalText,
-            translated_text: resVal.translatedText,
+            source_text: data.ocr_text || food?.name || 'Camera scan image',
+            translated_text: data.translated_text || food?.translated_name || '',
             metadata: {
               mode,
               confidence: food?.confidence ? Math.round(Number(food.confidence)) : undefined,
@@ -281,10 +469,10 @@ export default function CameraScreen() {
             }
           });
 
-          // Upload local captured/picked image file to history-files storage
-          const imgResponse = await fetch(uri);
+          // Upload captured image file to history-files storage
+          const imgResponse = await fetch(capturedImage);
           const imgBlob = await imgResponse.blob();
-          const imgPath = await historyService.uploadFile('camera', activity.id, 'captured.jpg', imgBlob, mimeType);
+          const imgPath = await historyService.uploadFile('camera', activity.id, 'captured.jpg', imgBlob, 'image/jpeg');
 
           await historyService.updateActivity(activity.id, {
             input_asset_path: imgPath,
@@ -294,68 +482,121 @@ export default function CameraScreen() {
         }
       }
 
-      // Generate a fresh request ID for the next capture
-      setCurrentRequestId(generateUUID());
-
-      queryClient.invalidateQueries({ queryKey: ['recentSessions', user.id] });
+      queryClient.invalidateQueries({ queryKey: ['activityHistory', user?.id] });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      setAnalysisResult(null);
-      Alert.alert('Camera Translation Error', error instanceof Error ? error.message : 'Failed to analyze this image.');
-    } finally {
-      setIsProcessing(false);
+      setCameraState('error');
+      setErrorMessage(error.message || 'Failed to analyze this image.');
+      Alert.alert('Camera Translation Error', error.message || 'Failed to analyze this image.');
     }
   };
 
-  const handleReset = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setCapturedImage(null);
-    setAnalysisResult(null);
-    setIsProcessing(false);
-  };
-
   const handleCopyText = () => {
+    if (!analysisResult) return;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    const textToCopy = analysisResult?.foodInfo
-      ? `${analysisResult.foodInfo.name} -> ${analysisResult.foodInfo.translatedName}`
-      : analysisResult?.translatedText;
+    const textToCopy = analysisResult.detectedText?.[0]?.text || analysisResult.summary;
     Alert.alert('Copied to Clipboard', textToCopy);
   };
 
+  // Translate detected text manually
+  const handleOpenLanguageSheet = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setLangSheetVisible(true);
+  };
+
+  const handleSelectLanguage = async (langCode: string) => {
+    setLangSheetVisible(false);
+    setSelectedTargetLanguage(langCode);
+    setCameraState('analysing');
+    try {
+      const sourceText = analysisResult?.detectedText?.[0]?.text || analysisResult?.summary || '';
+      // Fallback manual translation call
+      const { data, error } = await callEdgeFunction<any>('translate-text', {
+        text: sourceText,
+        target: langCode
+      });
+      if (error || !data) throw error || new Error('Translation failed');
+      setTranslationResult(data.translated_text);
+      setCameraState('result');
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (err: any) {
+      setCameraState('error');
+      setErrorMessage(err.message || 'Failed to translate.');
+      Alert.alert('Error', err.message || 'Failed to translate.');
+    }
+  };
+
+  // Conversational Follow-up
+  const handleSendFollowUp = async () => {
+    if (!followUpQuestion.trim() || followUpLoading) return;
+    const question = followUpQuestion.trim();
+    setFollowUpQuestion('');
+    setFollowUpLoading(true);
+
+    const newUserMsg = { role: 'user' as const, text: question };
+    setFollowUpHistory(prev => [...prev, newUserMsg]);
+
+    try {
+      // Call mock visualAnalysisService visual follow-up (throws "not configured")
+      // With fallback display message
+      let reply: string;
+      try {
+        reply = await visualAnalysisService.askVisualFollowUp(capturedImage || '', followUpHistory, question);
+      } catch (err: any) {
+        if (err.message?.includes('not configured')) {
+          reply = "Gemini visual analysis follow-up is not configured yet. This interface is fully prepared to receive replies.";
+        } else {
+          throw err;
+        }
+      }
+      setFollowUpHistory(prev => [...prev, { role: 'model' as const, text: reply }]);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (err: any) {
+      setFollowUpHistory(prev => [...prev, { role: 'model' as const, text: `Error: ${err.message || 'Failed to get answer.'}` }]);
+    } finally {
+      setFollowUpLoading(false);
+    }
+  };
+
+  // Selected history scan
   const handleSelectHistoryItem = async (item: any) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setHistoryVisible(false);
     
-    // Set Mode
     if (item.operation_type === 'food' || item.operation_type === 'menu' || item.operation_type === 'ocr') {
       setMode(item.operation_type as CameraMode);
     }
     
-    // Set Analysis Result
-    setAnalysisResult({
-      originalText: item.source_text || '',
-      translatedText: item.translated_text || '',
-      foodInfo: item.operation_type === 'food' ? {
-        name: item.source_text || '',
-        translatedName: item.translated_text || '',
-        calories: Number(item.metadata?.calories || 0),
-        protein: item.metadata?.protein || 'Unknown',
-        carbs: item.metadata?.carbs || 'Unknown',
-        fat: item.metadata?.fat || 'Unknown',
-        allergens: Array.isArray(item.metadata?.allergens) ? item.metadata?.allergens : [],
-        confidence: Number(item.metadata?.confidence || 100),
-      } : undefined,
-      ocrBoxes: []
-    });
+    const resVal: VisualAnalysisResult = {
+      category: item.operation_type === 'food' ? 'food' : 'text',
+      title: item.title || 'History Scan',
+      summary: item.translated_text || item.source_text || '',
+      suggestedActions: ['translate', 'ask_follow_up']
+    };
 
-    // Set Captured Image
+    if (item.operation_type === 'food') {
+      (resVal as any).foodInfo = {
+        name: item.source_text,
+        translatedName: item.translated_text,
+        calories: item.metadata?.calories || 0,
+        protein: item.metadata?.protein || '0g',
+        carbs: item.metadata?.carbs || '0g',
+        fat: item.metadata?.fat || '0g',
+        allergens: item.metadata?.allergens || [],
+        confidence: item.metadata?.confidence || 100
+      };
+    } else {
+      resVal.detectedText = [{ text: item.source_text }];
+    }
+
+    setAnalysisResult(resVal);
+    setCameraState('result');
+
     if (item.input_asset_path) {
       try {
         const url = await historyService.getSignedUrl(item.input_asset_path);
-        if (url) {
-          setCapturedImage(url);
-        }
+        if (url) setCapturedImage(url);
       } catch (err) {
         console.warn('Failed to load history image asset:', err);
         setCapturedImage(null);
@@ -368,7 +609,7 @@ export default function CameraScreen() {
   const handleDeleteHistoryItem = (itemId: string) => {
     Alert.alert(
       'Delete History Item',
-      'Are you sure you want to delete this scan from your history?',
+      'Are you sure you want to delete this scan from history?',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -380,7 +621,7 @@ export default function CameraScreen() {
               await deleteActivityMutation.mutateAsync(itemId);
               Alert.alert('Success', 'History item deleted.');
             } catch (err: any) {
-              Alert.alert('Deletion Error', err.message || 'Failed to delete history item.');
+              Alert.alert('Deletion Error', err.message || 'Failed to delete.');
             }
           }
         }
@@ -393,9 +634,46 @@ export default function CameraScreen() {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       await historyService.exportActivity(item);
     } catch (err: any) {
-      Alert.alert('Export Error', err.message || 'Failed to export scan.');
+      Alert.alert('Export Error', err.message || 'Failed to export.');
     }
   };
+
+  // Dynamic status bar and layout permissions checks
+  if (Platform.OS !== 'web') {
+    if (!permission) {
+      return (
+        <View style={styles.centeredContainer}>
+          <ActivityIndicator size="large" color={colors.primary} />
+        </View>
+      );
+    }
+
+    if (!permission.granted) {
+      const cannotAskAgain = !permission.canAskAgain;
+      return (
+        <View style={styles.permissionContainer}>
+          <Ionicons name="camera-outline" size={64} color={colors.disabled} />
+          <Text style={styles.permissionTitle}>Camera Access Required</Text>
+          <Text style={styles.permissionSubtitle}>
+            {cannotAskAgain
+              ? "Camera access was permanently denied. Please enable it in Settings to translate menus, signs, or products."
+              : "We need permission to use the camera to translate menus, text, and scan food products."}
+          </Text>
+          <TouchableOpacity 
+            style={styles.primaryBtn} 
+            onPress={cannotAskAgain ? () => Linking.openSettings() : requestPermission}
+          >
+            <Text style={styles.primaryBtnText}>
+              {cannotAskAgain ? "Open Settings" : "Grant Permission"}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.primaryBtn, { marginTop: 12, backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.border }]} onPress={handlePickImage}>
+            <Text style={[styles.primaryBtnText, { color: colors.textPrimary }]}>Upload Image Instead</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+  }
 
   return (
     <SafeAreaView style={styles.container}>
@@ -457,170 +735,316 @@ export default function CameraScreen() {
         {capturedImage ? (
           /* PREVIEW STATE */
           <View style={styles.previewWrapper}>
-            <Image source={{ uri: capturedImage }} style={styles.previewImage} resizeMode="cover" />
+            <Image source={{ uri: capturedImage }} style={styles.previewImage} resizeMode="contain" />
 
-            {/* OCR Bounding Boxes Highlight */}
-            {analysisResult && (mode === 'ocr' || mode === 'menu') && (
-              <View style={styles.ocrOverlay}>
-                {analysisResult.ocrBoxes?.map((box, index) => (
-                  <View
-                    key={index}
-                    style={[
-                      styles.ocrBox,
-                      {
-                        left: `${(box.x / 360) * 100}%`,
-                        top: `${(box.y / 480) * 100}%`,
-                        width: `${(box.w / 360) * 100}%`,
-                        height: `${(box.h / 480) * 100}%`,
-                      },
-                    ]}
-                  >
-                    <Text style={styles.ocrBoxLabel}>{box.translated}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
-
-            {isProcessing && (
+            {cameraState === 'analysing' && (
               <View style={styles.processingMask}>
                 <ActivityIndicator size="large" color={colors.background} />
-                <Text style={styles.processingText}>AI Scanning image...</Text>
+                <Text style={styles.processingText}>{progressMessage}</Text>
+                
+                {/* Vertical Scanner bar */}
+                <Animated.View 
+                  style={[
+                    styles.scannerBar,
+                    {
+                      transform: [{
+                        translateY: scanLineAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [0, 240]
+                        })
+                      }]
+                    }
+                  ]}
+                />
               </View>
             )}
           </View>
         ) : (
           /* CAMERA VIEW STATE */
           isFocused ? (
-            <CameraView style={styles.cameraView} flash={flash} ref={cameraRef} facing="back">
-              <View style={styles.overlayFrameContainer}>
-                {mode === 'ocr' && (
-                  <View style={styles.textTargetFrame}>
-                    <Text style={styles.targetFrameLabel}>ALIGN TEXT HERE</Text>
-                  </View>
-                )}
-                {mode === 'food' && (
-                  <View style={styles.foodTargetFrame}>
-                    <Text style={styles.targetFrameLabel}>CENTER MEAL / BARCODE</Text>
-                  </View>
-                )}
-                {mode === 'menu' && (
-                  <View style={styles.menuTargetFrame}>
-                    <Text style={styles.targetFrameLabel}>FIT MENU SECTION</Text>
-                  </View>
-                )}
+            Platform.OS === 'web' ? (
+              <View style={styles.webCameraContainer} onTouchEnd={handleFocusTap}>
+                <video
+                  ref={videoRef}
+                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                  playsInline
+                  muted
+                />
+                
+                {/* Corner Google Lens brackets overlay */}
+                <View style={styles.lensContainer}>
+                  <Animated.View style={[styles.cornerBracket, styles.bracketTopLeft, { opacity: breatheAnim }]} />
+                  <Animated.View style={[styles.cornerBracket, styles.bracketTopRight, { opacity: breatheAnim }]} />
+                  <Animated.View style={[styles.cornerBracket, styles.bracketBottomLeft, { opacity: breatheAnim }]} />
+                  <Animated.View style={[styles.cornerBracket, styles.bracketBottomRight, { opacity: breatheAnim }]} />
+                  
+                  {/* Tap focus ring */}
+                  {focusIndicator && (
+                    <Animated.View 
+                      style={[
+                        styles.focusRing,
+                        {
+                          left: focusIndicator.x - 20,
+                          top: focusIndicator.y - 20,
+                          transform: [{ scale: focusScale }],
+                          opacity: focusOpacity
+                        }
+                      ]}
+                    />
+                  )}
+                </View>
               </View>
-            </CameraView>
+            ) : (
+              <CameraView style={styles.cameraView} flash={flash} ref={cameraRef} facing="back">
+                <View style={styles.overlayFrameContainer}>
+                  <View style={styles.lensContainer}>
+                    <Animated.View style={[styles.cornerBracket, styles.bracketTopLeft, { opacity: breatheAnim }]} />
+                    <Animated.View style={[styles.cornerBracket, styles.bracketTopRight, { opacity: breatheAnim }]} />
+                    <Animated.View style={[styles.cornerBracket, styles.bracketBottomLeft, { opacity: breatheAnim }]} />
+                    <Animated.View style={[styles.cornerBracket, styles.bracketBottomRight, { opacity: breatheAnim }]} />
+                  </View>
+                </View>
+              </CameraView>
+            )
           ) : (
             <View style={[styles.cameraView, { justifyContent: 'center', alignItems: 'center', backgroundColor: colors.textPrimary }]}>
               <ActivityIndicator color={colors.background} />
             </View>
           )
         )}
+        
+        {/* Shutter White Flash Mask */}
+        <Animated.View style={[styles.shutterFlash, { opacity: flashAnim }]} pointerEvents="none" />
       </View>
 
       {/* Analysis Details Panel */}
-      {analysisResult && (
+      {analysisResult && cameraState === 'result' && (
         <ScrollView style={styles.resultsSheet} contentContainerStyle={styles.resultsSheetContent} showsVerticalScrollIndicator={false}>
-          {mode === 'food' && analysisResult.foodInfo ? (
+          {mode === 'food' && (analysisResult as any).foodInfo ? (
             /* FOOD ANALYSIS SCREEN DISPLAY */
             <View style={styles.foodReportCard}>
               <View style={styles.foodReportHeader}>
                 <View style={styles.foodTitleRow}>
-                  <Text style={styles.foodReportTitle}>{analysisResult.foodInfo.translatedName}</Text>
-                  <Text style={styles.foodReportSubTitle}>Original: {analysisResult.foodInfo.name}</Text>
+                  <Text style={styles.foodReportTitle}>{(analysisResult as any).foodInfo.translatedName}</Text>
+                  <Text style={styles.foodReportSubTitle}>Original: {(analysisResult as any).foodInfo.name}</Text>
                 </View>
                 <View style={styles.matchBadge}>
-                  <Text style={styles.matchBadgeText}>{analysisResult.foodInfo.confidence}% Match</Text>
+                  <Text style={styles.matchBadgeText}>{(analysisResult as any).foodInfo.confidence}% Match</Text>
                 </View>
               </View>
 
               {/* Nutrition breakdown grids */}
               <View style={styles.macroRow}>
                 <View style={styles.macroItem}>
-                  <Text style={styles.macroValue}>{analysisResult.foodInfo.calories}</Text>
+                  <Text style={styles.macroValue}>{(analysisResult as any).foodInfo.calories}</Text>
                   <Text style={styles.macroLabel}>CALORIES</Text>
                 </View>
                 <View style={styles.macroItem}>
-                  <Text style={[styles.macroValue, { color: colors.accentBlue }]}>{analysisResult.foodInfo.protein}</Text>
+                  <Text style={[styles.macroValue, { color: colors.accentBlue }]}>{(analysisResult as any).foodInfo.protein}</Text>
                   <Text style={styles.macroLabel}>PROTEIN</Text>
                 </View>
                 <View style={styles.macroItem}>
-                  <Text style={[styles.macroValue, { color: colors.accentOrange }]}>{analysisResult.foodInfo.carbs}</Text>
+                  <Text style={[styles.macroValue, { color: colors.accentOrange }]}>{(analysisResult as any).foodInfo.carbs}</Text>
                   <Text style={styles.macroLabel}>CARBS</Text>
                 </View>
                 <View style={styles.macroItem}>
-                  <Text style={[styles.macroValue, { color: colors.accentCoral }]}>{analysisResult.foodInfo.fat}</Text>
+                  <Text style={[styles.macroValue, { color: colors.accentCoral }]}>{(analysisResult as any).foodInfo.fat}</Text>
                   <Text style={styles.macroLabel}>FAT</Text>
                 </View>
               </View>
 
               {/* Allergens Warn Card */}
-              <View style={styles.allergenAlertCard}>
-                <Ionicons name="warning-outline" size={16} color={colors.warning} />
-                <Text style={styles.allergenAlertText}>
-                  Allergen Warnings: {analysisResult.foodInfo.allergens.join(', ')}
-                </Text>
-              </View>
-
-              <Text style={styles.analysisDescText}>
-                Translation Estimate based on AI image profiling. Actual nutritional contents may vary depending on ingredients and portion size.
-              </Text>
+              {Array.isArray((analysisResult as any).foodInfo.allergens) && (analysisResult as any).foodInfo.allergens.length > 0 && (
+                <View style={styles.allergenAlertCard}>
+                  <Ionicons name="warning-outline" size={16} color={colors.warning} />
+                  <Text style={styles.allergenAlertText}>
+                    Warnings: {(analysisResult as any).foodInfo.allergens.join(', ')}
+                  </Text>
+                </View>
+              )}
             </View>
           ) : (
             /* OCR TEXT RESULTS SCREEN DISPLAY */
             <View style={styles.textReportCard}>
               <Text style={styles.sectionLabel}>DETECTED TEXT</Text>
-              <Text style={styles.ocrSourceText}>{analysisResult.originalText}</Text>
-              <Ionicons name="arrow-down" size={18} color={colors.textMuted} style={styles.textArrow} />
-              <Text style={styles.sectionLabel}>{getLanguageName(targetLanguage).toUpperCase()} TRANSLATION</Text>
-              <Text style={styles.ocrTranslatedText}>{analysisResult.translatedText}</Text>
+              <Text style={styles.ocrSourceText}>{analysisResult.detectedText?.[0]?.text || analysisResult.summary}</Text>
+              
+              {translationResult && (
+                <>
+                  <Ionicons name="arrow-down" size={18} color={colors.textMuted} style={styles.textArrow} />
+                  <Text style={styles.sectionLabel}>TRANSLATION</Text>
+                  <Text style={styles.ocrTranslatedText}>{translationResult}</Text>
+                </>
+              )}
             </View>
           )}
 
           {/* Action Row */}
           <View style={styles.actionRow}>
             <TouchableOpacity style={styles.actionBtnOutline} onPress={handleCopyText}>
-              <Ionicons name="copy-outline" size={20} color={colors.primary} />
+              <Ionicons name="copy-outline" size={18} color={colors.textPrimary} />
               <Text style={styles.actionBtnTextOutline}>Copy</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.actionBtnOutline} onPress={() => saveBookmarkMutation.mutate()}>
-              <Ionicons name="bookmark-outline" size={20} color={colors.primary} />
-              <Text style={styles.actionBtnTextOutline}>Bookmark</Text>
-            </TouchableOpacity>
+            {analysisResult.suggestedActions.includes('translate') && (
+              <TouchableOpacity style={styles.actionBtnOutline} onPress={handleOpenLanguageSheet}>
+                <Ionicons name="language-outline" size={18} color={colors.textPrimary} />
+                <Text style={styles.actionBtnTextOutline}>Translate</Text>
+              </TouchableOpacity>
+            )}
 
-            <TouchableOpacity style={styles.actionBtnPrimary} onPress={handleReset}>
-              <Ionicons name="refresh" size={20} color={colors.textInverse} />
-              <Text style={styles.actionBtnTextPrimary}>Scan Again</Text>
+            <TouchableOpacity style={styles.actionBtnPrimary} onPress={resetCameraSession}>
+              <Ionicons name="refresh" size={18} color={colors.textInverse} />
+              <Text style={styles.actionBtnTextPrimary}>Retake</Text>
             </TouchableOpacity>
+          </View>
+
+          {/* Visual Conversational Follow-up UI */}
+          <View style={styles.followUpSection}>
+            <Text style={styles.sectionLabel}>ASK FOLLOW-UP QUESTIONS</Text>
+            
+            {/* Messages history logs */}
+            {followUpHistory.map((msg, index) => (
+              <View 
+                key={index} 
+                style={[
+                  styles.messageBubble, 
+                  msg.role === 'user' ? styles.userBubble : styles.modelBubble
+                ]}
+              >
+                <Text 
+                  style={[
+                    styles.messageText, 
+                    msg.role === 'user' ? styles.userMessageText : styles.modelMessageText
+                  ]}
+                >
+                  {msg.text}
+                </Text>
+              </View>
+            ))}
+
+            {/* Quick chips suggested queries */}
+            {followUpHistory.length === 0 && (
+              <View style={styles.suggestedChipsRow}>
+                {(mode === 'food' ? ["What ingredients are visible?", "Is this dish spicy?"] : ["Make this easier to understand.", "Summarize this text."]).map((prompt) => (
+                  <TouchableOpacity 
+                    key={prompt} 
+                    style={styles.promptChip}
+                    onPress={() => {
+                      setFollowUpQuestion(prompt);
+                    }}
+                  >
+                    <Text style={styles.promptChipText}>{prompt}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+
+            {/* Input Form */}
+            <View style={styles.inputFormRow}>
+              <TextInput
+                style={styles.followUpInput}
+                placeholder="Ask about this image..."
+                placeholderTextColor={colors.textSubtle}
+                value={followUpQuestion}
+                onChangeText={setFollowUpQuestion}
+                onSubmitEditing={handleSendFollowUp}
+              />
+              <TouchableOpacity 
+                style={[styles.sendBtn, !followUpQuestion.trim() && styles.sendBtnDisabled]}
+                onPress={handleSendFollowUp}
+                disabled={!followUpQuestion.trim() || followUpLoading}
+              >
+                {followUpLoading ? (
+                  <ActivityIndicator size="small" color={colors.textInverse} />
+                ) : (
+                  <Ionicons name="arrow-up" size={18} color={colors.textInverse} />
+                )}
+              </TouchableOpacity>
+            </View>
           </View>
         </ScrollView>
       )}
 
-      {/* Capture Controls Footer */}
-      {!analysisResult && !isProcessing && (
+      {/* Captured Review Controls */}
+      {capturedImage && cameraState === 'captured' && (
         <View style={styles.captureFooter}>
-          <TouchableOpacity style={styles.galleryBtn} onPress={handlePickImage} disabled={isProcessing}>
-            <Ionicons name="images-outline" size={24} color={colors.textPrimary} />
+          <TouchableOpacity style={styles.galleryBtn} onPress={resetCameraSession}>
+            <Ionicons name="close" size={24} color={colors.textPrimary} />
+            <Text style={{ fontSize: 9, color: colors.textPrimary, marginTop: 2 }}>Cancel</Text>
           </TouchableOpacity>
 
-          {capturedImage ? (
-            /* Retake Button */
-            <TouchableOpacity style={styles.retakeBtn} onPress={handleReset}>
-              <Ionicons name="close" size={28} color={colors.textPrimary} />
-            </TouchableOpacity>
-          ) : (
-            /* Main Capture Trigger Button */
-            <TouchableOpacity style={styles.captureBtn} onPress={handleCapture}>
-              <View style={styles.captureInnerCircle} />
-            </TouchableOpacity>
-          )}
-
-          <TouchableOpacity style={styles.historyBtn} onPress={() => setHistoryVisible(true)}>
-            <Ionicons name="time-outline" size={24} color={colors.textPrimary} />
+          <TouchableOpacity style={styles.analyseLaunchBtn} onPress={handleStartAnalysis}>
+            <Ionicons name="sparkles-outline" size={24} color={colors.textInverse} />
+            <Text style={{ fontSize: 13, fontWeight: '700', color: colors.textInverse, marginLeft: 8 }}>Analyse Scan</Text>
           </TouchableOpacity>
         </View>
       )}
+
+      {/* Capture Controls Footer */}
+      {cameraState === 'ready' && (
+        <View style={styles.captureFooter}>
+          <TouchableOpacity style={styles.galleryBtn} onPress={handlePickImage}>
+            <Ionicons name="images-outline" size={22} color={colors.textPrimary} />
+            <Text style={{ fontSize: 8, color: colors.textPrimary, marginTop: 2 }}>Gallery</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.captureBtn} onPress={handleCapture}>
+            <View style={styles.captureInnerCircle} />
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.historyBtn} onPress={() => setHistoryVisible(true)}>
+            <Ionicons name="time-outline" size={22} color={colors.textPrimary} />
+            <Text style={{ fontSize: 8, color: colors.textPrimary, marginTop: 2 }}>Scans</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Searchable Language Selection Bottom Sheet */}
+      <Modal
+        visible={langSheetVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setLangSheetVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Translate To</Text>
+              <TouchableOpacity onPress={() => setLangSheetVisible(false)} style={styles.modalCloseBtn}>
+                <Ionicons name="close" size={24} color={colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.searchBarContainer}>
+              <Ionicons name="search" size={16} color={colors.textMuted} style={{ marginRight: 8 }} />
+              <TextInput
+                style={styles.searchBarInput}
+                placeholder="Search languages..."
+                placeholderTextColor={colors.textSubtle}
+                value={langSearchQuery}
+                onChangeText={setLangSearchQuery}
+              />
+            </View>
+            <ScrollView style={styles.historyList} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+              {searchLanguages
+                .filter(l => l.name.toLowerCase().includes(langSearchQuery.toLowerCase()))
+                .map((l) => (
+                  <TouchableOpacity 
+                    key={l.code} 
+                    style={styles.langRowItem}
+                    onPress={() => handleSelectLanguage(l.code)}
+                  >
+                    <Text style={styles.langRowText}>{l.name}</Text>
+                    {selectedTargetLanguage === l.code && (
+                      <Ionicons name="checkmark" size={18} color={colors.accentPurple} />
+                    )}
+                  </TouchableOpacity>
+                ))
+              }
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       {/* History Slide-up Modal */}
       <Modal
@@ -680,7 +1104,7 @@ export default function CameraScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: any) => StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
@@ -689,6 +1113,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    backgroundColor: colors.background,
   },
   permissionContainer: {
     flex: 1,
@@ -717,6 +1142,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xl,
     justifyContent: 'center',
     alignItems: 'center',
+    width: '80%',
     ...shadows.md,
   },
   primaryBtnText: {
@@ -779,13 +1205,13 @@ const styles = StyleSheet.create({
     marginHorizontal: 0,
     borderRadius: 0,
     overflow: 'hidden',
-    borderWidth: 0,
     backgroundColor: colors.textPrimary,
+    position: 'relative',
   },
   cameraView: {
     flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
+    width: '100%',
+    height: '100%',
   },
   overlayFrameContainer: {
     flex: 1,
@@ -793,80 +1219,20 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  textTargetFrame: {
-    width: SCREEN_WIDTH * 0.75,
-    height: 140,
-    borderWidth: 2,
-    borderStyle: 'dashed',
-    borderColor: colors.accentBlue,
-    borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.2)',
-  },
-  foodTargetFrame: {
-    width: SCREEN_WIDTH * 0.7,
-    height: SCREEN_WIDTH * 0.7,
-    borderWidth: 2,
-    borderStyle: 'dashed',
-    borderColor: colors.accentGreen,
-    borderRadius: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.2)',
-  },
-  menuTargetFrame: {
-    width: SCREEN_WIDTH * 0.8,
-    height: SCREEN_HEIGHT * 0.35,
-    borderWidth: 2,
-    borderStyle: 'dashed',
-    borderColor: colors.accentOrange,
-    borderRadius: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.2)',
-  },
-  targetFrameLabel: {
-    ...typography.captionMedium,
-    color: colors.textInverse,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-    overflow: 'hidden',
-  },
   previewWrapper: {
     flex: 1,
     position: 'relative',
+    backgroundColor: colors.textPrimary,
   },
   previewImage: {
     flex: 1,
     width: '100%',
     height: '100%',
   },
-  ocrOverlay: {
+  shutterFlash: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(0,0,0,0.1)',
-  },
-  ocrBox: {
-    position: 'absolute',
-    borderWidth: 1,
-    borderColor: colors.accentBlue,
-    backgroundColor: 'rgba(91, 141, 239, 0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderRadius: 4,
-    paddingHorizontal: 2,
-  },
-  ocrBoxLabel: {
-    fontSize: 9,
-    fontWeight: '700',
-    color: colors.background,
-    backgroundColor: colors.accentBlue,
-    borderRadius: 3,
-    paddingHorizontal: 2,
-    overflow: 'hidden',
-    textAlign: 'center',
+    backgroundColor: '#FFFFFF',
+    zIndex: 99,
   },
   processingMask: {
     ...StyleSheet.absoluteFill,
@@ -879,6 +1245,64 @@ const styles = StyleSheet.create({
     color: colors.textInverse,
     marginTop: spacing.md,
   },
+  scannerBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 4,
+    backgroundColor: colors.accentPurple,
+    shadowColor: colors.accentPurple,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 10,
+  },
+  webCameraContainer: {
+    flex: 1,
+    position: 'relative',
+  },
+  lensContainer: {
+    ...StyleSheet.absoluteFill,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cornerBracket: {
+    position: 'absolute',
+    width: 32,
+    height: 32,
+    borderColor: '#FFFFFF',
+  },
+  bracketTopLeft: {
+    top: '15%',
+    left: '10%',
+    borderTopWidth: 3,
+    borderLeftWidth: 3,
+  },
+  bracketTopRight: {
+    top: '15%',
+    right: '10%',
+    borderTopWidth: 3,
+    borderRightWidth: 3,
+  },
+  bracketBottomLeft: {
+    bottom: '15%',
+    left: '10%',
+    borderBottomWidth: 3,
+    borderLeftWidth: 3,
+  },
+  bracketBottomRight: {
+    bottom: '15%',
+    right: '10%',
+    borderBottomWidth: 3,
+    borderRightWidth: 3,
+  },
+  focusRing: {
+    position: 'absolute',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+  },
   resultsSheet: {
     flex: 1,
     backgroundColor: colors.background,
@@ -889,10 +1313,10 @@ const styles = StyleSheet.create({
   resultsSheetContent: {
     padding: layout.pageMargin,
     paddingTop: spacing.xl,
-    paddingBottom: 120,
+    paddingBottom: 140,
   },
   textReportCard: {
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfaceSoft,
     padding: layout.cardPadding,
     borderRadius: layout.cardRadius,
     borderWidth: 0,
@@ -903,6 +1327,7 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     letterSpacing: 0.5,
     marginBottom: 6,
+    textTransform: 'uppercase',
   },
   ocrSourceText: {
     ...typography.body,
@@ -921,7 +1346,7 @@ const styles = StyleSheet.create({
     marginVertical: spacing.sm,
   },
   foodReportCard: {
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfaceSoft,
     padding: layout.cardPadding,
     borderRadius: layout.cardRadius,
     borderWidth: 0,
@@ -969,11 +1394,13 @@ const styles = StyleSheet.create({
   },
   macroItem: {
     flex: 1,
-    backgroundColor: colors.backgroundMuted,
+    backgroundColor: colors.background,
     borderRadius: 12,
     paddingVertical: spacing.sm,
     alignItems: 'center',
     marginHorizontal: 3,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   macroValue: {
     ...typography.heading4,
@@ -1002,12 +1429,6 @@ const styles = StyleSheet.create({
     marginLeft: spacing.sm,
     flex: 1,
   },
-  analysisDescText: {
-    ...typography.small,
-    color: colors.textSubtle,
-    lineHeight: 16,
-    fontStyle: 'italic',
-  },
   actionRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1016,15 +1437,14 @@ const styles = StyleSheet.create({
   actionBtnOutline: {
     flex: 1,
     height: 48,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfaceSoft,
     borderWidth: 1,
-    borderColor: colors.borderStrong,
+    borderColor: colors.border,
     borderRadius: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 6,
-    ...shadows.sm,
   },
   actionBtnTextOutline: {
     ...typography.buttonSmall,
@@ -1032,7 +1452,7 @@ const styles = StyleSheet.create({
     marginLeft: 6,
   },
   actionBtnPrimary: {
-    flex: 1.5,
+    flex: 1,
     height: 48,
     backgroundColor: colors.primary,
     borderRadius: 12,
@@ -1040,7 +1460,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginLeft: 6,
-    ...shadows.md,
   },
   actionBtnTextPrimary: {
     ...typography.buttonSmall,
@@ -1049,18 +1468,19 @@ const styles = StyleSheet.create({
   },
   captureFooter: {
     position: 'absolute',
-    bottom: 96,
+    bottom: 40,
     left: 0,
     right: 0,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: spacing['2xl'],
+    zIndex: 99,
   },
   galleryBtn: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
@@ -1085,30 +1505,108 @@ const styles = StyleSheet.create({
     borderRadius: 31,
     backgroundColor: colors.primary,
   },
-  retakeBtn: {
-    width: 76,
-    height: 76,
-    borderRadius: 38,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    justifyContent: 'center',
-    alignItems: 'center',
-    ...shadows.lg,
-  },
-  spacerBtn: {
-    width: 52,
-  },
   historyBtn: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
     justifyContent: 'center',
     alignItems: 'center',
     ...shadows.sm,
+  },
+  analyseLaunchBtn: {
+    flex: 1,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: colors.accentPurple,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: spacing.lg,
+    ...shadows.md,
+  },
+  followUpSection: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  messageBubble: {
+    padding: spacing.md,
+    borderRadius: 16,
+    marginVertical: 4,
+    maxWidth: '85%',
+  },
+  userBubble: {
+    backgroundColor: colors.primary,
+    alignSelf: 'flex-end',
+    borderBottomRightRadius: 4,
+  },
+  modelBubble: {
+    backgroundColor: colors.surfaceSoft,
+    alignSelf: 'flex-start',
+    borderBottomLeftRadius: 4,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  messageText: {
+    ...typography.body,
+    fontSize: 14,
+    lineHeight: 18,
+  },
+  userMessageText: {
+    color: colors.textInverse,
+  },
+  modelMessageText: {
+    color: colors.textPrimary,
+  },
+  suggestedChipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginVertical: spacing.md,
+  },
+  promptChip: {
+    backgroundColor: colors.surfaceSoft,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+  },
+  promptChipText: {
+    ...typography.captionMedium,
+    color: colors.textSecondary,
+  },
+  inputFormRow: {
+    flexDirection: 'row',
+    marginTop: spacing.md,
+    gap: spacing.sm,
+    alignItems: 'center',
+  },
+  followUpInput: {
+    flex: 1,
+    height: 44,
+    backgroundColor: colors.surfaceSoft,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 22,
+    paddingHorizontal: spacing.lg,
+    color: colors.textPrimary,
+    fontFamily: typography.body.fontFamily,
+  },
+  sendBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  sendBtnDisabled: {
+    backgroundColor: colors.disabled,
   },
   modalOverlay: {
     flex: 1,
@@ -1141,10 +1639,6 @@ const styles = StyleSheet.create({
   },
   historyList: {
     flex: 1,
-  },
-  historyContainer: {
-    marginTop: 10,
-    marginBottom: 20,
   },
   historyCard: {
     backgroundColor: colors.surfaceSoft,
@@ -1205,5 +1699,32 @@ const styles = StyleSheet.create({
     color: colors.textSubtle,
     textAlign: 'center',
     marginTop: 30,
+  },
+  searchBarContainer: {
+    flexDirection: 'row',
+    backgroundColor: colors.backgroundSoft,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    height: 40,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  searchBarInput: {
+    flex: 1,
+    color: colors.textPrimary,
+    fontFamily: typography.body.fontFamily,
+    fontSize: 14,
+  },
+  langRowItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderColor: colors.border,
+  },
+  langRowText: {
+    ...typography.bodyMedium,
+    color: colors.textPrimary,
   },
 });
