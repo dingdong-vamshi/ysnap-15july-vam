@@ -68,7 +68,7 @@ export const DimensionalIcon: React.FC<DimensionalIconProps> = ({
   // Clone icon to enforce monochrome colors
   const renderIcon = () => {
     if (React.isValidElement(icon)) {
-      const iconColor = isSelected ? '#FFFFFF' : '#171717';
+      const iconColor = isSelected ? '#FFFFFF' : '#000000';
       return React.cloneElement(icon as React.ReactElement<any>, {
         color: iconColor,
       });

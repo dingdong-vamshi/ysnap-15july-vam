@@ -11,6 +11,7 @@ import { tempOnboardingStore, demoProfileStore } from '../../utils/tempOnboardin
 import { supabase } from '../../lib/supabase';
 import { useQueryClient } from '@tanstack/react-query';
 import { SuccessFeedback, TactileButton } from '../../components';
+import { useTheme, useThemeStyles } from '../../contexts/ThemeContext';
 
 const AUTH_CALLBACK_URL = `${(process.env.EXPO_PUBLIC_APP_URL || 'http://localhost:8081').replace(/\/$/, '')}/auth/callback`;
 const SIGNUP_RETRY_COOLDOWN_SECONDS = 60;
@@ -25,6 +26,8 @@ export default function SignUpScreen() {
   const router = useRouter();
   const { reason } = useLocalSearchParams<{ reason?: string }>();
   const { signUp, signInAnonymously } = useAuth();
+  const { isDark } = useTheme();
+  const styles = useThemeStyles(createStyles);
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -229,7 +232,7 @@ export default function SignUpScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <ScrollView contentContainerStyle={styles.scrollContainer} keyboardShouldPersistTaps="handled">
-        <StatusBar style="dark" />
+        <StatusBar style={isDark ? 'light' : 'dark'} />
         
         {/* Header */}
         <View style={styles.header}>
@@ -413,7 +416,7 @@ export default function SignUpScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: any) => StyleSheet.create({
   scrollContainer: {
     flexGrow: 1,
     backgroundColor: colors.background,

@@ -17,10 +17,14 @@ import { ConfirmationModal, DimensionalIcon } from '../../components';
 import { demoProfileStore } from '../../utils/tempOnboardingStore';
 import { clearDemoSession } from '../_layout';
 
+import { useTheme, useThemeStyles } from '../../contexts/ThemeContext';
+
 export default function ProfileTab() {
   const router = useRouter();
   const { user, signOut } = useAuth();
   const queryClient = useQueryClient();
+  const { isDark } = useTheme();
+  const styles = useThemeStyles(createStyles);
 
   const [modalVisible, setModalVisible] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
@@ -92,7 +96,7 @@ export default function ProfileTab() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar style="dark" />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
       <MotionScreen>
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         <Text style={styles.pageTitle}>Profile</Text>
@@ -239,7 +243,7 @@ export default function ProfileTab() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: any) => StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
@@ -363,13 +367,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: colors.errorLight,
     borderWidth: 1,
-    borderColor: '#FCDCDD',
+    borderColor: colors.border,
     borderRadius: 16,
     paddingVertical: 16,
     marginTop: 12,
   },
   signOutButtonPressed: {
-    backgroundColor: '#FAECEE',
+    backgroundColor: colors.backgroundMuted,
   },
   signOutText: {
     fontSize: 15,

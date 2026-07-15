@@ -55,10 +55,14 @@ const PURPOSES: PurposeOption[] = [
   { id: 'social', title: 'Everyday Practice', description: 'Chat with friends and family in multiple languages.', icon: MessageSquare },
 ];
 
+import { useTheme, useThemeStyles } from '../../contexts/ThemeContext';
+
 export default function OnboardingLanguagesScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const queryClient = useQueryClient();
+  const { isDark } = useTheme();
+  const styles = useThemeStyles(createStyles);
 
   const tempChoices = tempOnboardingStore.get();
 
@@ -125,7 +129,7 @@ export default function OnboardingLanguagesScreen() {
 
   return (
     <View style={styles.container}>
-      <StatusBar style="dark" />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
       <OnboardingProgressHeader
         currentStep={0}
         totalSteps={2}
@@ -266,7 +270,7 @@ export default function OnboardingLanguagesScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: any) => StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,

@@ -11,10 +11,14 @@ import { supabase } from '../../lib/supabase';
 import { useQueryClient } from '@tanstack/react-query';
 import { TactileButton } from '../../components';
 
+import { useTheme, useThemeStyles } from '../../contexts/ThemeContext';
+
 export default function SignInScreen() {
   const router = useRouter();
   const { reason } = useLocalSearchParams<{ reason?: string }>();
   const { signIn, resetPassword, signInAnonymously } = useAuth();
+  const { isDark } = useTheme();
+  const styles = useThemeStyles(createStyles);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -171,7 +175,7 @@ export default function SignInScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <ScrollView contentContainerStyle={styles.scrollContainer} keyboardShouldPersistTaps="handled">
-        <StatusBar style="dark" />
+        <StatusBar style={isDark ? 'light' : 'dark'} />
         
         {/* Header */}
         <View style={styles.header}>
@@ -273,7 +277,7 @@ export default function SignInScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: any) => StyleSheet.create({
   scrollContainer: {
     flexGrow: 1,
     backgroundColor: colors.background,

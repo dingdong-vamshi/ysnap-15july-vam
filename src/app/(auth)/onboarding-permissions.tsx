@@ -40,9 +40,10 @@ interface PermissionCardProps {
   icon: any;
   isGranted: boolean | null;
   onRequest: () => void;
+  styles: any;
 }
 
-function PermissionCard({ title, description, icon, isGranted, onRequest }: PermissionCardProps) {
+function PermissionCard({ title, description, icon, isGranted, onRequest, styles }: PermissionCardProps) {
   const IconComponent = icon;
   return (
     <View style={styles.card}>
@@ -76,10 +77,14 @@ function PermissionCard({ title, description, icon, isGranted, onRequest }: Perm
   );
 }
 
+import { useTheme, useThemeStyles } from '../../contexts/ThemeContext';
+
 export default function OnboardingPermissionsScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const queryClient = useQueryClient();
+  const { isDark } = useTheme();
+  const styles = useThemeStyles(createStyles);
 
   const [micGranted, setMicGranted] = useState<boolean | null>(null);
   const [cameraGranted, setCameraGranted] = useState<boolean | null>(null);
@@ -137,7 +142,7 @@ export default function OnboardingPermissionsScreen() {
 
   return (
     <View style={styles.container}>
-      <StatusBar style="dark" />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
       <OnboardingProgressHeader
         currentStep={1}
         totalSteps={2}
@@ -161,6 +166,7 @@ export default function OnboardingPermissionsScreen() {
                 icon={Mic}
                 isGranted={micGranted}
                 onRequest={requestMicrophone}
+                styles={styles}
               />
 
               <PermissionCard
@@ -169,6 +175,7 @@ export default function OnboardingPermissionsScreen() {
                 icon={Camera}
                 isGranted={cameraGranted}
                 onRequest={requestCamera}
+                styles={styles}
               />
             </View>
 
@@ -194,7 +201,7 @@ export default function OnboardingPermissionsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: any) => StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,

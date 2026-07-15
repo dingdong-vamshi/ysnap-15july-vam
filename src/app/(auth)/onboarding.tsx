@@ -33,8 +33,12 @@ const modes = [
   { label: 'Type', detail: 'Translate any message', icon: Languages },
 ];
 
+import { useTheme, useThemeStyles } from '../../contexts/ThemeContext';
+
 export default function Onboarding() {
   const router = useRouter();
+  const { isDark } = useTheme();
+  const styles = useThemeStyles(createStyles);
   const [step, setStep] = useState(0);
   const [native, setNative] = useState('English');
   const [target, setTarget] = useState('Spanish');
@@ -273,7 +277,7 @@ export default function Onboarding() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="dark" />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
       <OnboardingProgressHeader
         currentStep={step}
         totalSteps={9}
@@ -315,7 +319,7 @@ export default function Onboarding() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: any) => StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.background },
   kicker: { ...typography.micro, color: colors.textMuted, marginBottom: spacing.sm },
   title: { ...typography.display, color: colors.textPrimary, marginBottom: spacing.sm, maxWidth: 360 },

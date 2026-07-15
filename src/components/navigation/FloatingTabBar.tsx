@@ -16,6 +16,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '../../lib/supabase';
 import { AppIcon } from '../ui/AppIcon';
+import { BrandMark } from '../brand/BrandMark';
 
 interface FloatingTabBarProps {
   state: any;
@@ -68,7 +69,7 @@ export const FloatingTabBar: React.FC<FloatingTabBarProps> = ({
             styles.cameraIconContainer,
             isFocused && styles.cameraIconContainerActive
           ]}>
-            <AppIcon name="camera" size={26} color="#FFFFFF" focused={isFocused} />
+            <BrandMark size={28} variant="transparent" />
           </View>
         );
       case 'practice':

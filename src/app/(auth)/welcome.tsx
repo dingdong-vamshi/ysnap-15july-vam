@@ -6,15 +6,18 @@ import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
 import { Languages } from 'lucide-react-native';
 import { colors, layout, spacing, typography } from '../../constants';
-import { PrimaryButton, SecondaryButton, TactileButton } from '../../components';
-import { IllustrationFrame } from '../../components/IllustrationFrame';
-import { ResponsiveOnboardingLayout } from '../../components/ResponsiveOnboardingLayout';
+import { PrimaryButton, SecondaryButton, TactileButton, IllustrationFrame, ResponsiveOnboardingLayout } from '../../components';
+import { BrandLockup } from '../../components/brand/BrandLockup';
 import { demoProfileStore } from '../../utils/tempOnboardingStore';
+
+import { useTheme, useThemeStyles } from '../../contexts/ThemeContext';
 
 export default function WelcomeScreen() {
   const router = useRouter();
   const { width } = useWindowDimensions();
   const isDesktop = width >= 900;
+  const { isDark } = useTheme();
+  const styles = useThemeStyles(createStyles);
 
   const handleGetStarted = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -35,14 +38,9 @@ export default function WelcomeScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="dark" />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
       <View style={styles.container}>
-        <View style={styles.brandRow}>
-          <View style={styles.brandMark}>
-            <Languages size={20} color={colors.textInverse} strokeWidth={2.4} />
-          </View>
-          <Text style={styles.brand}>YSnap</Text>
-        </View>
+        <BrandLockup size={24} style={{ marginBottom: spacing.md }} />
 
         <View style={styles.hero}>
           <ResponsiveOnboardingLayout>
@@ -65,7 +63,7 @@ export default function WelcomeScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: any) => StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.background },
   container: {
     flex: 1,
