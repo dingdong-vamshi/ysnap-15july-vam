@@ -5,11 +5,11 @@ import { useCameraState } from './cameraState';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../../constants/colors';
 
-interface CameraViewfinderNativeProps {
+interface CameraViewfinderProps {
   onImageCaptured: (uri: string) => void;
 }
 
-export const CameraViewfinderNative: React.FC<CameraViewfinderNativeProps> = ({ onImageCaptured }) => {
+export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({ onImageCaptured }) => {
   const {
     cameraState,
     setCameraState,

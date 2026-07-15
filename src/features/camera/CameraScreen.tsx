@@ -11,8 +11,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { useCameraState, CameraStateProvider } from './cameraState';
-import { CameraViewfinderWeb } from './CameraViewfinder.web';
-import { CameraViewfinderNative } from './CameraViewfinder.native';
+import { CameraViewfinder } from './CameraViewfinder';
 import { CameraScannerOverlay } from './CameraScannerOverlay';
 import { CameraCapturedPreview } from './CameraCapturedPreview';
 import { CameraAnalysisStatus } from './CameraAnalysisStatus';
@@ -459,11 +458,7 @@ Target Language: ${targetLanguage}`;
 
       {/* Viewfinders and overlays */}
       <View style={styles.viewport}>
-        {Platform.OS === 'web' ? (
-          <CameraViewfinderWeb onImageSelected={handleImageSource} />
-        ) : (
-          <CameraViewfinderNative onImageCaptured={handleImageSource} />
-        )}
+        <CameraViewfinder onImageCaptured={handleImageSource} />
 
         <CameraCapturedPreview />
         <CameraScannerOverlay />

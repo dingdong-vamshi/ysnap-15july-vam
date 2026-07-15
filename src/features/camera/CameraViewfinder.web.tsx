@@ -5,11 +5,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../../constants/colors';
 import { validateImageFile } from './cameraUtils';
 
-interface CameraViewfinderWebProps {
-  onImageSelected: (uri: string, file?: File) => void;
+interface CameraViewfinderProps {
+  onImageCaptured: (uri: string) => void;
 }
 
-export const CameraViewfinderWeb: React.FC<CameraViewfinderWebProps> = ({ onImageSelected }) => {
+export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({ onImageCaptured }) => {
   const {
     cameraState,
     setCameraState,
@@ -126,7 +126,7 @@ export const CameraViewfinderWeb: React.FC<CameraViewfinderWebProps> = ({ onImag
         canvas.toBlob((blob) => {
           if (blob) {
             const objectUrl = URL.createObjectURL(blob);
-            onImageSelected(objectUrl);
+            onImageCaptured(objectUrl);
           }
         }, 'image/jpeg', 0.92);
       }
@@ -135,7 +135,7 @@ export const CameraViewfinderWeb: React.FC<CameraViewfinderWebProps> = ({ onImag
       setCameraState('error');
       setErrorMessage('Frame capture failed: ' + err.message);
     }
-  }, [onImageSelected, setCameraState, setErrorMessage]);
+  }, [onImageCaptured, setCameraState, setErrorMessage]);
 
   // Expose capture method globally on window for testing or parent communication
   useEffect(() => {
@@ -162,7 +162,7 @@ export const CameraViewfinderWeb: React.FC<CameraViewfinderWebProps> = ({ onImag
     }
 
     const objectUrl = URL.createObjectURL(file);
-    onImageSelected(objectUrl, file);
+    onImageCaptured(objectUrl);
   };
 
   const triggerFileUpload = () => {
