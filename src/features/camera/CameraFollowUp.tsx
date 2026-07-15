@@ -26,6 +26,29 @@ const SUGGESTED_PROMPTS = [
   'List visible ingredients',
 ];
 
+const CameraFollowUpNativeAudio: React.FC<{
+  followUpAudioUrl: string | null;
+  isPlayingLocal: boolean;
+  setIsPlayingLocal: (playing: boolean) => void;
+  playerRef: React.MutableRefObject<any>;
+}> = ({ followUpAudioUrl, isPlayingLocal, setIsPlayingLocal, playerRef }) => {
+  const player = useAudioPlayer(followUpAudioUrl || '');
+
+  React.useEffect(() => {
+    playerRef.current = player;
+  }, [player]);
+
+  React.useEffect(() => {
+    if (isPlayingLocal && player) {
+      if (!player.playing && player.currentTime >= player.duration - 0.2) {
+        setIsPlayingLocal(false);
+      }
+    }
+  }, [player.playing, player.currentTime, isPlayingLocal]);
+
+  return null;
+};
+
 export const CameraFollowUp: React.FC = () => {
   const {
     cameraState,
@@ -39,14 +62,8 @@ export const CameraFollowUp: React.FC = () => {
 
   const [input, setInput] = useState('');
   const [followUpAudioUrl, setFollowUpAudioUrl] = useState<string | null>(null);
-  const player = useAudioPlayer(followUpAudioUrl || '');
   const [isPlayingLocal, setIsPlayingLocal] = useState(false);
-
-  React.useEffect(() => {
-    if (isPlayingLocal && !player.playing && player.currentTime >= player.duration - 0.2) {
-      setIsPlayingLocal(false);
-    }
-  }, [player.playing, player.currentTime]);
+  const playerRef = React.useRef<any>(null);
 
   if (cameraState !== 'follow_up') return null;
 
@@ -81,8 +98,10 @@ export const CameraFollowUp: React.FC = () => {
         );
         if (ttsRes && ttsRes.url) {
           setFollowUpAudioUrl(ttsRes.url);
-          player.replace({ uri: ttsRes.url });
-          player.play();
+          if (playerRef.current) {
+            playerRef.current.replace({ uri: ttsRes.url });
+            playerRef.current.play();
+          }
           setIsPlayingLocal(true);
         }
       } catch (ttsErr) {
@@ -99,7 +118,9 @@ export const CameraFollowUp: React.FC = () => {
   const handlePlayTTS = async (text: string) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (isPlayingLocal) {
-      player.pause();
+      if (playerRef.current) {
+        playerRef.current.pause();
+      }
       setIsPlayingLocal(false);
       return;
     }
@@ -113,8 +134,10 @@ export const CameraFollowUp: React.FC = () => {
       );
       if (ttsRes && ttsRes.url) {
         setFollowUpAudioUrl(ttsRes.url);
-        player.replace({ uri: ttsRes.url });
-        player.play();
+        if (playerRef.current) {
+          playerRef.current.replace({ uri: ttsRes.url });
+          playerRef.current.play();
+        }
       }
     } catch (err) {
       setIsPlayingLocal(false);
@@ -195,6 +218,14 @@ export const CameraFollowUp: React.FC = () => {
           <Ionicons name="arrow-up" size={20} color="#FFFFFF" />
         </Pressable>
       </View>
+      {Platform.OS !== 'web' && (
+        <CameraFollowUpNativeAudio
+          followUpAudioUrl={followUpAudioUrl}
+          isPlayingLocal={isPlayingLocal}
+          setIsPlayingLocal={setIsPlayingLocal}
+          playerRef={playerRef}
+        />
+      )}
     </View>
   );
 };

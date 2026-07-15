@@ -37,6 +37,29 @@ import { useTheme } from '../contexts/ThemeContext';
 
 const CHAR_LIMIT = 500;
 
+const TextTranslationNativeAudio: React.FC<{
+  outputAudioUrl: string | null;
+  playingTts: boolean;
+  setPlayingTts: (playing: boolean) => void;
+  playerRef: React.MutableRefObject<any>;
+}> = ({ outputAudioUrl, playingTts, setPlayingTts, playerRef }) => {
+  const player = useAudioPlayer(outputAudioUrl || '');
+
+  React.useEffect(() => {
+    playerRef.current = player;
+  }, [player]);
+
+  React.useEffect(() => {
+    if (playingTts && player) {
+      if (!player.playing && player.currentTime >= player.duration - 0.2) {
+        setPlayingTts(false);
+      }
+    }
+  }, [player.playing, player.currentTime, playingTts]);
+
+  return null;
+};
+
 export default function TextTranslationScreen() {
   const router = useRouter();
   const { user } = useAuth();
@@ -45,8 +68,8 @@ export default function TextTranslationScreen() {
 
   const [currentRequestId, setCurrentRequestId] = useState(generateUUID());
   const [outputAudioUrl, setOutputAudioUrl] = useState<string | null>(null);
-  const player = useAudioPlayer(outputAudioUrl || '');
   const [playingTts, setPlayingTts] = useState(false);
+  const playerRef = React.useRef<any>(null);
 
   const [sourceText, setSourceText] = useState('');
   const [translationResult, setTranslationResult] = useState<{
@@ -193,18 +216,14 @@ export default function TextTranslationScreen() {
     }
   };
 
-  useEffect(() => {
-    if (playingTts && !player.playing && player.currentTime >= player.duration - 0.2) {
-      setPlayingTts(false);
-    }
-  }, [player.playing, player.currentTime]);
-
   const handleTtsPlayback = async () => {
     if (!translationResult?.translated) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
     if (playingTts) {
-      player.pause();
+      if (playerRef.current) {
+        playerRef.current.pause();
+      }
       setPlayingTts(false);
       return;
     }
@@ -225,8 +244,10 @@ export default function TextTranslationScreen() {
           throw new Error('TTS synthesis returned empty URL');
         }
       }
-      player.replace({ uri: audioUrl });
-      player.play();
+      if (playerRef.current) {
+        playerRef.current.replace({ uri: audioUrl });
+        playerRef.current.play();
+      }
     } catch (err: any) {
       console.error(err);
       Alert.alert('TTS Playback Failed', err.message || 'Error occurred during speech synthesis.');
@@ -601,6 +622,14 @@ export default function TextTranslationScreen() {
           </View>
         </View>
       </Modal>
+      {Platform.OS !== 'web' && (
+        <TextTranslationNativeAudio
+          outputAudioUrl={outputAudioUrl}
+          playingTts={playingTts}
+          setPlayingTts={setPlayingTts}
+          playerRef={playerRef}
+        />
+      )}
     </SafeAreaView>
   );
 }

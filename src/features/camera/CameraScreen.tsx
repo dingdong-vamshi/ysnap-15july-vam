@@ -97,6 +97,29 @@ class WebPCMPlayer {
   }
 }
 
+const CameraNativeAudio: React.FC<{
+  nativeTtsUrl: string | null;
+  isPlayingLiveAudio: boolean;
+  setIsPlayingLiveAudio: (playing: boolean) => void;
+  playerRef: React.MutableRefObject<any>;
+}> = ({ nativeTtsUrl, isPlayingLiveAudio, setIsPlayingLiveAudio, playerRef }) => {
+  const player = useAudioPlayer(nativeTtsUrl || '');
+
+  useEffect(() => {
+    playerRef.current = player;
+  }, [player]);
+
+  useEffect(() => {
+    if (isPlayingLiveAudio && player) {
+      if (!player.playing && player.currentTime >= player.duration - 0.2) {
+        setIsPlayingLiveAudio(false);
+      }
+    }
+  }, [player.playing, player.currentTime, isPlayingLiveAudio]);
+
+  return null;
+};
+
 const CameraScreenContent: React.FC = () => {
   const router = useRouter();
   const { user } = useAuth();
@@ -132,7 +155,7 @@ const CameraScreenContent: React.FC = () => {
 
   const [langSheetVisible, setLangSheetVisible] = useState(false);
   const [nativeTtsUrl, setNativeTtsUrl] = useState<string | null>(null);
-  const nativePlayer = useAudioPlayer(nativeTtsUrl || '');
+  const playerRef = useRef<any>(null);
 
   // Reset session on mount and unmount
   useEffect(() => {
@@ -141,15 +164,6 @@ const CameraScreenContent: React.FC = () => {
       resetCameraSession();
     };
   }, []);
-
-  // Handle native audio playback completion status
-  useEffect(() => {
-    if (isPlayingLiveAudio && Platform.OS !== 'web' && nativePlayer) {
-      if (!nativePlayer.playing && nativePlayer.currentTime >= nativePlayer.duration - 0.2) {
-        setIsPlayingLiveAudio(false);
-      }
-    }
-  }, [nativePlayer.playing, nativePlayer.currentTime, isPlayingLiveAudio]);
 
   const handleImageSource = async (uri: string, webFile?: File) => {
     try {
@@ -344,8 +358,10 @@ Target Language: ${targetLanguage}`;
         );
         if (res && res.url) {
           setNativeTtsUrl(res.url);
-          nativePlayer.replace({ uri: res.url });
-          nativePlayer.play();
+          if (playerRef.current) {
+            playerRef.current.replace({ uri: res.url });
+            playerRef.current.play();
+          }
         } else {
           throw new Error('TTS empty URL');
         }
@@ -542,6 +558,14 @@ Target Language: ${targetLanguage}`;
           }
         }}
       />
+      {Platform.OS !== 'web' && (
+        <CameraNativeAudio
+          nativeTtsUrl={nativeTtsUrl}
+          isPlayingLiveAudio={isPlayingLiveAudio}
+          setIsPlayingLiveAudio={setIsPlayingLiveAudio}
+          playerRef={playerRef}
+        />
+      )}
     </SafeAreaView>
   );
 };
